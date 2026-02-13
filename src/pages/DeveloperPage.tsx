@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Maximize2, Minimize2, ChevronLeft, ChevronRight } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Maximize2, Minimize2, ChevronLeft, ChevronRight, Save, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { FileExplorer } from '@/components/developer/FileExplorer';
@@ -17,19 +17,22 @@ export default function DeveloperPage() {
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
 
-  const handleFileSelect = (file: FileNode) => {
+  // Fetch file content from backend and open in editor
+  const handleFileSelect = async (file: FileNode) => {
     if (file.type === 'folder') return;
-    
+
     const existing = openFiles.find(f => f.path === file.path);
     if (existing) {
       setActiveFileId(existing.id);
     } else {
-      // TODO: Fetch file content from backend API
+      // Fetch file content from backend API
+      const res = await fetch(`/api/file?path=${encodeURIComponent(file.path)}`);
+      const data = await res.json();
       const newFile: OpenFile = {
         id: Date.now().toString(),
         name: file.name,
         path: file.path,
-        content: '', // Will be loaded from backend
+        content: data.content || '',
         language: file.language || 'typescript',
         isModified: false,
       };
@@ -39,12 +42,103 @@ export default function DeveloperPage() {
     setSelectedPath(file.path);
   };
 
+  // Save file to backend
+  const handleFileSave = async (file: OpenFile) => {
+    try {
+      const res = await fetch('/api/file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: file.path, content: file.content }),
+      });
+      if (res.ok) {
+        setOpenFiles(prev => prev.map(f =>
+          f.id === file.id ? { ...f, isModified: false } : f
+        ));
+      }
+    } catch (err) {
+      console.error('Failed to save file:', err);
+    }
+  };
+
+  // Autosave effect (1s debounce)
+  useEffect(() => {
+    const activeFile = openFiles.find(f => f.id === activeFileId);
+    if (!activeFile || !activeFile.isModified) return;
+
+    const timeoutId = setTimeout(() => {
+      handleFileSave(activeFile);
+    }, 1000);
+
+    return () => clearTimeout(timeoutId);
+  }, [activeFileId, openFiles]);
+
+  // Keyboard shortcut for saving
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        const activeFile = openFiles.find(f => f.id === activeFileId);
+        if (activeFile) {
+          handleFileSave(activeFile);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeFileId, openFiles]);
+
+  // Fetch file tree
+  const loadFiles = async () => {
+    try {
+      const res = await fetch('/api/files?path=.');
+      const data = await res.json();
+      setFiles(data.children ? data.children : [data]);
+    } catch (err) {
+      console.error("Failed to load files:", err);
+    }
+  };
+
+  // Handle workspace change
+  const handleChangeWorkspace = async () => {
+    try {
+      const selectRes = await fetch('/api/select-workspace-folder', { method: 'POST' });
+      const selectData = await selectRes.json();
+
+      const path = selectData.path;
+      if (!path) return;
+
+      const res = await fetch('/api/files?path=' + encodeURIComponent(path));
+      if (res.ok) {
+        const data = await res.json();
+        setFiles(data.children ? data.children : [data]);
+        setOpenFiles([]); // Close all files
+        setActiveFileId(null);
+        setSelectedPath(null);
+      }
+    } catch (err) {
+      console.error("Failed to change workspace:", err);
+    }
+  };
+
+  useEffect(() => {
+    loadFiles();
+  }, []);
+
   const handleFileClose = (fileId: string) => {
     const newFiles = openFiles.filter(f => f.id !== fileId);
     setOpenFiles(newFiles);
     if (activeFileId === fileId) {
       setActiveFileId(newFiles.length > 0 ? newFiles[newFiles.length - 1].id : null);
     }
+  };
+
+  const handleCloseAllFiles = () => {
+    if (openFiles.some(f => f.isModified)) {
+      if (!confirm("You have unsaved changes. Are you sure you want to close all?")) return;
+    }
+    setOpenFiles([]);
+    setActiveFileId(null);
   };
 
   return (
@@ -58,13 +152,21 @@ export default function DeveloperPage() {
             leftPanelOpen ? 'w-56' : 'w-0'
           )}
         >
-          <FileExplorer 
-            onFileSelect={handleFileSelect} 
+          <FileExplorer
+            onFileSelect={handleFileSelect}
             selectedPath={selectedPath}
             files={files}
+            onRefresh={loadFiles}
+            onFileUpload={async (file) => {
+              const formData = new FormData();
+              formData.append('file', file);
+              await fetch('/api/upload', { method: 'POST', body: formData });
+              loadFiles();
+            }}
+            onWorkspaceChange={handleChangeWorkspace}
           />
         </div>
-        
+
         {/* Left Panel Toggle */}
         <button
           onClick={() => setLeftPanelOpen(!leftPanelOpen)}
@@ -80,8 +182,39 @@ export default function DeveloperPage() {
         {/* Center - Code Editor & Terminal */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {/* Open Files Header */}
-          <div className="h-8 bg-secondary/20 border-b border-border flex items-center px-2">
-            <span className="text-xs text-muted-foreground">Open Files</span>
+          <div className="h-8 bg-secondary/20 border-b border-border flex items-center justify-between px-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">Open Files</span>
+              {openFiles.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-5 px-1.5 text-[10px] text-muted-foreground hover:text-red-400"
+                  onClick={handleCloseAllFiles}
+                  title="Close All Files"
+                >
+                  <X className="h-3 w-3 mr-1" />
+                  Close All
+                </Button>
+              )}
+            </div>
+            {activeFileId && openFiles.find(f => f.id === activeFileId)?.isModified && (
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-primary animate-pulse">Syncing...</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-[10px] gap-1 px-2 hover:bg-primary/20"
+                  onClick={() => {
+                    const activeFile = openFiles.find(f => f.id === activeFileId);
+                    if (activeFile) handleFileSave(activeFile);
+                  }}
+                >
+                  <Save className="h-3 w-3" />
+                  Save Now
+                </Button>
+              </div>
+            )}
           </div>
 
           {/* Code Display Window */}
@@ -91,6 +224,11 @@ export default function DeveloperPage() {
               activeFileId={activeFileId}
               onFileClose={handleFileClose}
               onFileSelect={setActiveFileId}
+              onContentChange={(fileId, newContent) => {
+                setOpenFiles(prev => prev.map(f =>
+                  f.id === fileId ? { ...f, content: newContent, isModified: true } : f
+                ));
+              }}
             />
           </div>
 

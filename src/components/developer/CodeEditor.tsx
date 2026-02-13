@@ -7,9 +7,10 @@ interface CodeEditorProps {
   activeFileId: string | null;
   onFileClose: (fileId: string) => void;
   onFileSelect: (fileId: string) => void;
+  onContentChange: (fileId: string, newContent: string) => void;
 }
 
-export function CodeEditor({ openFiles, activeFileId, onFileClose, onFileSelect }: CodeEditorProps) {
+export function CodeEditor({ openFiles, activeFileId, onFileClose, onFileSelect, onContentChange }: CodeEditorProps) {
   const activeFile = openFiles.find(f => f.id === activeFileId);
 
   return (
@@ -38,18 +39,14 @@ export function CodeEditor({ openFiles, activeFileId, onFileClose, onFileSelect 
       </div>
 
       {/* Editor Content */}
-      <div className="flex-1 overflow-auto p-4 font-mono text-sm">
+      <div className="flex-1 overflow-hidden relative font-mono text-sm">
         {activeFile ? (
-          <pre className="text-foreground/90">
-            {activeFile.content.split('\n').map((line, i) => (
-              <div key={i} className="flex hover:bg-editor-line">
-                <span className="w-12 text-right pr-4 text-muted-foreground select-none">
-                  {i + 1}
-                </span>
-                <code className="flex-1">{highlightSyntax(line)}</code>
-              </div>
-            ))}
-          </pre>
+          <textarea
+            className="w-full h-full p-4 bg-editor-bg text-foreground/90 resize-none outline-none font-mono text-sm leading-relaxed"
+            value={activeFile.content}
+            onChange={(e) => onContentChange(activeFile.id, e.target.value)}
+            spellCheck={false}
+          />
         ) : (
           <div className="h-full flex items-center justify-center text-muted-foreground">
             <p>Select a file to view its content</p>
@@ -63,18 +60,18 @@ export function CodeEditor({ openFiles, activeFileId, onFileClose, onFileSelect 
 // Simple syntax highlighting
 function highlightSyntax(line: string): React.ReactNode {
   const keywords = ['import', 'export', 'const', 'let', 'var', 'function', 'return', 'if', 'else', 'async', 'await', 'from', 'interface', 'type'];
-  
+
   let result = line;
-  
+
   // Highlight strings
   result = result.replace(/(["'`])([^"'`]*)\1/g, '<span class="text-syntax-string">$&</span>');
-  
+
   // Highlight keywords
   keywords.forEach(kw => {
     const regex = new RegExp(`\\b${kw}\\b`, 'g');
     result = result.replace(regex, `<span class="text-syntax-keyword">${kw}</span>`);
   });
-  
+
   // Highlight comments
   if (line.trim().startsWith('//')) {
     result = `<span class="text-syntax-comment">${line}</span>`;

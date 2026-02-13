@@ -1,11 +1,27 @@
+# NOTE: For file explorer, code editor, and terminal integration with the frontend, use the FastAPI endpoints in app.py:
+#   - GET /api/files?path=...   (list files/folders)
+#   - GET /api/file?path=...    (read file content)
+#   - POST /api/file            (save file content)
+#   - POST /api/terminal        (execute terminal command)
 import os
 import subprocess
 import google.generativeai as genai
 from typing import Dict, Union
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # Configuration
-genai.configure(api_key="YOUR_GEMINI_API_KEY")
-model = genai.GenerativeModel('gemini-1.5-flash')
+api_key = os.getenv("GEMINI_API_KEY")
+model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+
+if api_key and api_key != "YOUR_GEMINI_API_KEY":
+    genai.configure(api_key=api_key)
+else:
+    # Fallback to current behavior or print warning
+    pass
+
+model = genai.GenerativeModel(model_name)
 
 class TerminalAgent:
     def __init__(self):

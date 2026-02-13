@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import {
   ChevronRight,
   ChevronDown,
@@ -8,13 +8,19 @@ import {
   FileJson,
   FileType,
   File,
+  RefreshCw,
+  ExternalLink,
+  Upload,
+  Plus,
+  FolderSync,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { FileNode } from '@/types/api';
+import { Button } from '@/components/ui/button';
 
 const getFileIcon = (name: string, isOpen?: boolean) => {
   const ext = name.split('.').pop()?.toLowerCase();
-  
+
   if (ext === 'tsx' || ext === 'ts') return <FileCode className="h-4 w-4 text-syntax-keyword" />;
   if (ext === 'json') return <FileJson className="h-4 w-4 text-syntax-function" />;
   if (ext === 'md') return <FileType className="h-4 w-4 text-syntax-string" />;
@@ -46,7 +52,7 @@ function FileTreeItem({ node, depth, selectedPath, onSelect }: FileTreeItemProps
       <div
         onClick={handleClick}
         className={cn(
-          'file-tree-item',
+          'file-tree-item group',
           isSelected && 'active'
         )}
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
@@ -70,9 +76,23 @@ function FileTreeItem({ node, depth, selectedPath, onSelect }: FileTreeItemProps
             {getFileIcon(node.name)}
           </>
         )}
-        <span className="truncate">{node.name}</span>
+        <span className="truncate flex-1">{node.name}</span>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            fetch('/api/open-folder', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: node.path }),
+            });
+          }}
+          className="p-1 opacity-0 group-hover:opacity-100 hover:bg-muted-foreground/20 rounded-sm transition-opacity"
+          title="Reveal in Finder/Explorer"
+        >
+          <ExternalLink className="h-3 w-3 text-muted-foreground" />
+        </button>
       </div>
-      
+
       {isFolder && isOpen && node.children && (
         <div>
           {node.children.map((child) => (
@@ -94,18 +114,121 @@ interface FileExplorerProps {
   onFileSelect: (file: FileNode) => void;
   selectedPath: string | null;
   files?: FileNode[];
+  onRefresh?: () => void;
+  onFileUpload?: (file: File) => void;
+  onWorkspaceChange?: () => void;
 }
 
-export function FileExplorer({ onFileSelect, selectedPath, files = [] }: FileExplorerProps) {
+export function FileExplorer({
+  onFileSelect,
+  selectedPath,
+  files = [],
+  onRefresh,
+  onFileUpload,
+  onWorkspaceChange
+}: FileExplorerProps) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && onFileUpload) {
+      onFileUpload(file);
+    }
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleCreateFile = async () => {
+    const filename = prompt("Enter filename:");
+    if (!filename) return;
+
+    try {
+      const res = await fetch('/api/file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filename, content: '' }),
+      });
+      if (res.ok && onRefresh) {
+        onRefresh();
+      }
+    } catch (err) {
+      console.error("Failed to create file:", err);
+    }
+  };
+
   return (
     <div className="h-full flex flex-col">
-      <div className="ide-panel-header">
-        <span className="ide-panel-title">Files & Folders</span>
+      <div className="ide-panel-header flex-col items-start gap-2 py-3">
+        <div className="w-full flex items-center justify-between">
+          <span className="ide-panel-title">Workspace</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2 text-[10px] gap-1 hover:bg-primary/10"
+            onClick={onWorkspaceChange}
+          >
+            <FolderSync className="h-3 w-3" />
+            Change Root
+          </Button>
+        </div>
+        <div className="w-full flex items-center gap-1">
+          <input
+            type="file"
+            ref={fileInputRef}
+            className="hidden"
+            onChange={handleFileChange}
+          />
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={handleCreateFile}
+            title="Create New File"
+          >
+            <Plus className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={handleUploadClick}
+            title="Import/Upload File from Finder"
+          >
+            <Upload className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={() => {
+              fetch('/api/open-folder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: '.' }),
+              });
+            }}
+            title="Open in Finder/Explorer"
+          >
+            <ExternalLink className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={onRefresh}
+            title="Refresh files"
+          >
+            <RefreshCw className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+          </Button>
+        </div>
       </div>
       <div className="flex-1 overflow-auto py-2">
         {files.length === 0 ? (
           <div className="text-xs text-muted-foreground text-center py-4 px-2">
-            No files loaded
+            No workspace loaded. Click 'Change Root' to select a folder.
           </div>
         ) : (
           files.map((node) => (

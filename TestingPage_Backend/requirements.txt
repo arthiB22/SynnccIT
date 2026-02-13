@@ -9,3 +9,5 @@ python-multipart==0.0.6
 pydantic==2.5.0
 matplotlib==3.8.2
 networkx==3.2
+google-generativeai
+python-dotenv

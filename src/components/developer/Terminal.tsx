@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Play, Square, Trash2, Sparkles } from 'lucide-react';
+import { useState, useRef, useEffect } from 'react';
+import { Play, Square, Trash2, Sparkles, Monitor } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { TerminalOutput } from '@/types/api';
@@ -10,17 +10,80 @@ interface TerminalProps {
   aiSummary?: TerminalOutput[];
 }
 
-export function Terminal({ className, output = [], aiSummary = [] }: TerminalProps) {
+export function Terminal({ className, output: initialOutput = [], aiSummary = [] }: TerminalProps) {
   const [mode, setMode] = useState<'original' | 'ai'>('original');
   const [command, setCommand] = useState('');
+  const [history, setHistory] = useState<TerminalOutput[]>(initialOutput);
+  const [cwd, setCwd] = useState<string>('~');
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  const displayOutput = mode === 'original' ? output : aiSummary;
+  const displayOutput = mode === 'original' ? history : aiSummary;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [history]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: Connect to backend API to execute command
-    console.log('Execute command:', command);
+    if (!command.trim()) return;
+
+    const cmd = command;
     setCommand('');
+
+    // Add command to history
+    const newEntry: TerminalOutput = {
+      id: Date.now().toString(),
+      type: 'command',
+      content: `${cwd} $ ${cmd}`,
+      timestamp: new Date().toISOString()
+    };
+
+    setHistory(prev => [...prev, newEntry]);
+
+    try {
+      const res = await fetch('/api/terminal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: cmd }),
+      });
+      const data = await res.json();
+
+      if (data.cwd) setCwd(data.cwd);
+
+      if (data.stdout) {
+        setHistory(prev => [...prev, {
+          id: Date.now().toString() + '_out',
+          type: 'output',
+          content: data.stdout,
+          timestamp: new Date().toISOString()
+        }]);
+      }
+      if (data.stderr) {
+        setHistory(prev => [...prev, {
+          id: Date.now().toString() + '_err',
+          type: 'error',
+          content: data.stderr,
+          timestamp: new Date().toISOString()
+        }]);
+      }
+    } catch (err) {
+      setHistory(prev => [...prev, {
+        id: Date.now().toString() + '_err',
+        type: 'error',
+        content: `Failed to execute: ${err}`,
+        timestamp: new Date().toISOString()
+      }]);
+    }
+  };
+
+  const clearTerminal = () => {
+    setHistory([]);
+  };
+
+  const openSystemTerminal = () => {
+    fetch('/api/open-terminal', { method: 'POST' });
   };
 
   return (
@@ -34,8 +97,8 @@ export function Terminal({ className, output = [], aiSummary = [] }: TerminalPro
               onClick={() => setMode('original')}
               className={cn(
                 'px-3 py-1 text-xs font-medium transition-colors',
-                mode === 'original' 
-                  ? 'bg-primary text-primary-foreground' 
+                mode === 'original'
+                  ? 'bg-primary text-primary-foreground'
                   : 'bg-secondary/50 text-muted-foreground hover:text-foreground'
               )}
             >
@@ -45,8 +108,8 @@ export function Terminal({ className, output = [], aiSummary = [] }: TerminalPro
               onClick={() => setMode('ai')}
               className={cn(
                 'px-3 py-1 text-xs font-medium transition-colors flex items-center gap-1',
-                mode === 'ai' 
-                  ? 'bg-primary text-primary-foreground' 
+                mode === 'ai'
+                  ? 'bg-primary text-primary-foreground'
                   : 'bg-secondary/50 text-muted-foreground hover:text-foreground'
               )}
             >
@@ -56,33 +119,42 @@ export function Terminal({ className, output = [], aiSummary = [] }: TerminalPro
           </div>
         </div>
         <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={openSystemTerminal}
+            title="Open System Terminal"
+          >
+            <Monitor className="h-3 w-3 text-muted-foreground hover:text-foreground" />
+          </Button>
           <Button variant="ghost" size="icon" className="h-6 w-6">
             <Play className="h-3 w-3" />
           </Button>
           <Button variant="ghost" size="icon" className="h-6 w-6">
             <Square className="h-3 w-3" />
           </Button>
-          <Button variant="ghost" size="icon" className="h-6 w-6">
+          <Button variant="ghost" size="icon" className="h-6 w-6" onClick={clearTerminal}>
             <Trash2 className="h-3 w-3" />
           </Button>
         </div>
       </div>
 
       {/* Terminal Output */}
-      <div className="flex-1 overflow-auto p-3 font-mono text-sm space-y-1">
+      <div ref={scrollRef} className="flex-1 overflow-auto p-3 font-mono text-sm space-y-1">
         {displayOutput.length === 0 ? (
           <div className="text-muted-foreground text-center py-8">
-            No terminal output yet
+            Type a command to start...
           </div>
         ) : (
           displayOutput.map((line) => (
-            <div 
-              key={line.id} 
+            <div
+              key={line.id}
               className={cn(
-                'terminal-line',
-                line.type === 'command' && 'terminal-prompt font-semibold',
-                line.type === 'output' && 'terminal-output',
-                line.type === 'error' && 'text-destructive',
+                'terminal-line whitespace-pre-wrap break-all',
+                line.type === 'command' && 'terminal-prompt font-semibold text-blue-400',
+                line.type === 'output' && 'terminal-output text-foreground/90',
+                line.type === 'error' && 'text-red-400',
                 line.type === 'ai-summary' && 'text-primary'
               )}
             >
@@ -93,15 +165,16 @@ export function Terminal({ className, output = [], aiSummary = [] }: TerminalPro
       </div>
 
       {/* Command Input */}
-      <form onSubmit={handleSubmit} className="border-t border-border p-2">
+      <form onSubmit={handleSubmit} className="border-t border-border p-2 bg-terminal-bg">
         <div className="flex items-center gap-2 font-mono text-sm">
-          <span className="text-primary">$</span>
+          <span className="text-green-500 whitespace-nowrap max-w-[150px] truncate" title={cwd}>{cwd.split('/').pop() || '~'} $</span>
           <input
             type="text"
             value={command}
             onChange={(e) => setCommand(e.target.value)}
             placeholder="Enter command..."
             className="flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-foreground"
+            autoFocus
           />
         </div>
       </form>

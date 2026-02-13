@@ -1,6 +1,5 @@
 from typing import TypedDict, List, Dict
-from langchain_openai import ChatOpenAI
-# from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 import os
 from dotenv import load_dotenv
@@ -16,12 +15,10 @@ class CodeReviewState(TypedDict):
 
 class SimpleCodeReviewAgent:
     def __init__(self):
-        self.llm = ChatOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_BASE_URL"),
-            model=os.getenv("OPENAI_MODEL"),
+        self.llm = ChatGoogleGenerativeAI(
+            google_api_key=os.getenv("GEMINI_API_KEY"),
+            model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
             temperature=0,
-            max_tokens=500,
         )
 
 

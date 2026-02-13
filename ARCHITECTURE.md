@@ -1,4 +1,4 @@
-## AI_CLI_IDE Project Architecture
+# AI_CLI_IDE Project Architecture
 
 ### Overview
 AI_CLI_IDE is a modular, full-stack application designed to provide an AI-powered developer environment with a modern frontend and multiple backend services. The project is organized into a main frontend app and several backend services, each responsible for a specific domain or page.
