@@ -13,6 +13,7 @@ import {
   Upload,
   Plus,
   FolderSync,
+  FolderSearch,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { FileNode } from '@/types/api';
@@ -163,18 +164,7 @@ export function FileExplorer({
   return (
     <div className="h-full flex flex-col">
       <div className="ide-panel-header flex-col items-start gap-2 py-2">
-        <div className="w-full flex items-center justify-between">
-          <span className="ide-panel-title">Workspace</span>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-1.5 text-[10px] gap-1 hover:bg-primary/10 ml-auto"
-            onClick={onWorkspaceChange}
-          >
-            <FolderSync className="h-3 w-3" />
-            Change Root
-          </Button>
-        </div>
+        <span className="ide-panel-title">Workspace</span>
         <div className="w-full flex items-center gap-0.5 border-t border-white/5 pt-1.5 mt-1">
           <input
             type="file"
@@ -182,6 +172,15 @@ export function FileExplorer({
             className="hidden"
             onChange={handleFileChange}
           />
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={onWorkspaceChange}
+            title="Select Workspace Folder from Finder"
+          >
+            <FolderSearch className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+          </Button>
           <Button
             variant="ghost"
             size="icon"
@@ -243,6 +242,6 @@ export function FileExplorer({
           ))
         )}
       </div>
-    </div>
+    </div >
   );
 }

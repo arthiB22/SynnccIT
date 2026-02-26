@@ -1,17 +1,23 @@
+import os
+import json
+import asyncio
+import signal
 from fastapi import FastAPI, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-import os
+from dotenv import load_dotenv
+
+# Load common environment from root
+env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../.env'))
+load_dotenv(env_path)
 import subprocess
 import pty
 import fcntl
 import termios
 import struct
 import select
-import asyncio
-import signal
 from typing import List, Optional, Dict
 from watchfiles import awatch
 
@@ -21,6 +27,16 @@ try:
     HAS_GENAI = True
 except ImportError:
     HAS_GENAI = False
+
+class FileSaveRequest(BaseModel):
+    path: str
+    content: str
+
+class TerminalRequest(BaseModel):
+    command: str
+
+class AgentRequest(BaseModel):
+    prompt: str
 
 app = FastAPI()
 
@@ -39,8 +55,8 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from dotenv import load_dotenv
-load_dotenv()
+
+# Global state
 
 # Global state
 CURRENT_DIR = os.getcwd()
@@ -48,11 +64,31 @@ TERM_PROCESS = None
 MASTER_FD = None
 terminal_lock = asyncio.Lock()
 
-# Configure GenAI if available
-if HAS_GENAI:
-# ... (rest of the code)
+def set_winsize(fd, rows, cols):
+    """Update PTY window size."""
+    if fd is not None:
+        try:
+            s = struct.pack('HHHH', int(rows), int(cols), 0, 0)
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, s)
+        except Exception as e:
+            logger.error(f"Failed to set winsize: {e}")
 
-# ... (other code)
+
+# Configure GenAI
+model = None
+if HAS_GENAI:
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    model_name = os.getenv("GEMINI_MODEL") or os.getenv("GOOGLE_MODEL") or "gemini-1.5-flash"
+    
+    if api_key and not api_key.startswith("YOUR_"):
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel(model_name)
+            logger.info(f"GenAI configured with model: {model_name}")
+        except Exception as e:
+            logger.error(f"Failed to configure GenAI: {e}")
+    else:
+        logger.warning("No valid Google/Gemini API Key found. AI Agent will be disabled.")
 
 @app.websocket("/ws/terminal")
 async def terminal_websocket(websocket: WebSocket):
@@ -127,15 +163,25 @@ async def terminal_websocket(websocket: WebSocket):
         while True:
             msg = await websocket.receive_text()
             if msg:
-                if MASTER_FD is None:
-                    await ensure_terminal()
-                
-                fd = MASTER_FD
-                if fd is not None:
-                    try:
-                        os.write(fd, msg.encode())
-                    except Exception as e:
-                        logger.error(f"Error writing to PTY: {e}")
+                try:
+                    data = json.loads(msg)
+                    msg_type = data.get("type")
+                    
+                    if MASTER_FD is None:
+                        await ensure_terminal()
+                    
+                    fd = MASTER_FD
+                    if fd is not None:
+                        if msg_type == "input":
+                            os.write(fd, data.get("data", "").encode())
+                        elif msg_type == "resize":
+                            set_winsize(fd, data.get("rows", 24), data.get("cols", 80))
+                except json.JSONDecodeError:
+                    # Fallback for raw text if still sent somehow
+                    if MASTER_FD is not None:
+                        os.write(MASTER_FD, msg.encode())
+                except Exception as e:
+                    logger.error(f"Error processing terminal msg: {e}")
             await asyncio.sleep(0.01)
     except WebSocketDisconnect:
         logger.info("Terminal WebSocket disconnected")
@@ -352,27 +398,89 @@ async def upload_file(file: UploadFile = File(...), path: Optional[str] = Form(N
 
 @app.post("/api/select-workspace-folder")
 def select_workspace_folder():
+    """Opens a native OS folder selection dialog."""
     try:
         import platform
-        if platform.system() == "Darwin":  # macOS
+        system = platform.system()
+        path = None
+        
+        if system == "Darwin":  # macOS
             cmd = 'osascript -e "POSIX path of (choose folder with prompt \\"Select Workspace Folder\\")"'
             result = subprocess.check_output(cmd, shell=True, text=True).strip()
             if result:
-                global CURRENT_DIR
-                CURRENT_DIR = result
-                # Kill old terminal process to spawn new one in new dir
-                global TERM_PROCESS, MASTER_FD
-                if TERM_PROCESS:
+                path = result
+        elif system == "Windows":
+            # Use PowerShell to open a folder picker
+            ps_script = """
+            Add-Type -AssemblyName System.Windows.Forms;
+            $f = New-Object System.Windows.Forms.FolderBrowserDialog;
+            $f.Description = 'Select Workspace Folder';
+            if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath }
+            """
+            result = subprocess.check_output(["powershell", "-NoProfile", "-Command", ps_script], text=True).strip()
+            if result:
+                path = result
+        else:  # Linux (GTK/KDE)
+            try:
+                # Try zenity (GTK)
+                path = subprocess.check_output(["zenity", "--file-selection", "--directory", "--title=Select Workspace Folder"], text=True).strip()
+            except:
+                try:
+                    # Try kdialog (KDE)
+                    path = subprocess.check_output(["kdialog", "--getexistingdirectory"], text=True).strip()
+                except:
+                    logger.error("No folder selection tool found on Linux (Zenity or Kdialog required)")
+        
+        if path:
+            global CURRENT_DIR
+            CURRENT_DIR = os.path.abspath(path)
+            logger.info(f"Workspace root changed to: {CURRENT_DIR}")
+            
+            # Reset Terminal PTY to pick up the new directory next time it starts
+            global TERM_PROCESS, MASTER_FD
+            if TERM_PROCESS:
+                try:
                     TERM_PROCESS.terminate()
-                    TERM_PROCESS = None
-                    MASTER_FD = None
-                return {"path": result}
-        return {"error": "Native selector only available on macOS"}
+                except:
+                    pass
+                TERM_PROCESS = None
+                MASTER_FD = None
+                
+            return {"path": CURRENT_DIR}
+        
+        return {"error": "Folder selection cancelled or failed"}
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Workspace selection error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.post("/api/open-folder")
+def open_folder(req: Dict[str, str]):
+    """Opens a directory in the native file explorer."""
+    path = req.get("path")
+    if not path or path == ".":
+        path = CURRENT_DIR
+    elif not os.path.isabs(path):
+        path = os.path.join(CURRENT_DIR, path)
+        
+    if not os.path.exists(path):
+        return JSONResponse(status_code=404, content={"error": "Path not found"})
+    
+    try:
+        import platform
+        system = platform.system()
+        if system == "Darwin":  # macOS
+            subprocess.run(["open", path])
+        elif system == "Windows":
+            os.startfile(path)
+        else:  # Linux
+            subprocess.run(["xdg-open", path])
+        return {"success": True}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/api/open-terminal")
 def open_terminal():
+    """Opens a native OS terminal in the current directory."""
     global CURRENT_DIR
     try:
         import platform
@@ -380,9 +488,16 @@ def open_terminal():
         if system == "Darwin":  # macOS
             subprocess.run(["open", "-a", "Terminal", CURRENT_DIR])
         elif system == "Windows":
-            subprocess.run(["start", "cmd"], shell=True, cwd=CURRENT_DIR)
+            subprocess.run(["start", "cmd", "/K", f"cd /d {CURRENT_DIR}"], shell=True)
         else:  # Linux
-            subprocess.run(["x-terminal-emulator"], cwd=CURRENT_DIR)
+            # Try common terminals
+            terminals = ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"]
+            for term in terminals:
+                try:
+                    subprocess.run([term], cwd=CURRENT_DIR, start_new_session=True)
+                    break
+                except FileNotFoundError:
+                    continue
         return {"success": True}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
