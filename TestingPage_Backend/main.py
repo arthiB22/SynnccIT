@@ -258,6 +258,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from routers.testcase_router import testcase_router
 from routers.simulation_router import simulation_router
 from routers.flowchart_router import flowchart_router
+from routers.ai_router import ai_router
 
 app = FastAPI(
     title="AI Code Reviewer Backend",
@@ -278,6 +279,7 @@ app.add_middleware(
 app.include_router(testcase_router, prefix="/api/testcases", tags=["Test Cases"])
 app.include_router(simulation_router, prefix="/api/simulation", tags=["Simulation"])
 app.include_router(flowchart_router, prefix="/api/flowchart", tags=["Flowchart"])
+app.include_router(ai_router, prefix="/api/ai", tags=["AI Features"])
 
 @app.get("/")
 def home():

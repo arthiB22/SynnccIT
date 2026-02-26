@@ -21,10 +21,10 @@ import { Button } from '@/components/ui/button';
 const getFileIcon = (name: string, isOpen?: boolean) => {
   const ext = name.split('.').pop()?.toLowerCase();
 
-  if (ext === 'tsx' || ext === 'ts') return <FileCode className="h-4 w-4 text-syntax-keyword" />;
-  if (ext === 'json') return <FileJson className="h-4 w-4 text-syntax-function" />;
-  if (ext === 'md') return <FileType className="h-4 w-4 text-syntax-string" />;
-  return <File className="h-4 w-4 text-muted-foreground" />;
+  if (ext === 'tsx' || ext === 'ts') return <FileCode className="h-3 w-3 text-syntax-keyword" />;
+  if (ext === 'json') return <FileJson className="h-3 w-3 text-syntax-function" />;
+  if (ext === 'md') return <FileType className="h-3 w-3 text-syntax-string" />;
+  return <File className="h-3 w-3 text-muted-foreground" />;
 };
 
 interface FileTreeItemProps {
@@ -53,9 +53,10 @@ function FileTreeItem({ node, depth, selectedPath, onSelect }: FileTreeItemProps
         onClick={handleClick}
         className={cn(
           'file-tree-item group',
-          isSelected && 'active'
+          isSelected && 'active',
+          isFolder ? 'text-[12px] font-medium py-1' : 'text-[11px] py-0.5'
         )}
-        style={{ paddingLeft: `${depth * 12 + 8}px` }}
+        style={{ paddingLeft: `${depth * 10 + 8}px` }}
       >
         {isFolder ? (
           <>
@@ -65,14 +66,14 @@ function FileTreeItem({ node, depth, selectedPath, onSelect }: FileTreeItemProps
               <ChevronRight className="h-3 w-3 text-muted-foreground" />
             )}
             {isOpen ? (
-              <FolderOpen className="h-4 w-4 text-syntax-function" />
+              <FolderOpen className="h-3.5 w-3.5 text-syntax-function" />
             ) : (
-              <Folder className="h-4 w-4 text-syntax-function" />
+              <Folder className="h-3.5 w-3.5 text-syntax-function" />
             )}
           </>
         ) : (
           <>
-            <span className="w-3" />
+            <span className="w-2.5" />
             {getFileIcon(node.name)}
           </>
         )}
@@ -143,7 +144,7 @@ export function FileExplorer({
 
   const handleCreateFile = async () => {
     const filename = prompt("Enter filename:");
-    if (!filename) return;
+    if (!filename) return null;
 
     try {
       const res = await fetch('/api/file', {
@@ -161,20 +162,20 @@ export function FileExplorer({
 
   return (
     <div className="h-full flex flex-col">
-      <div className="ide-panel-header flex-col items-start gap-2 py-3">
+      <div className="ide-panel-header flex-col items-start gap-2 py-2">
         <div className="w-full flex items-center justify-between">
           <span className="ide-panel-title">Workspace</span>
           <Button
             variant="ghost"
             size="sm"
-            className="h-6 px-2 text-[10px] gap-1 hover:bg-primary/10"
+            className="h-6 px-1.5 text-[10px] gap-1 hover:bg-primary/10 ml-auto"
             onClick={onWorkspaceChange}
           >
             <FolderSync className="h-3 w-3" />
             Change Root
           </Button>
         </div>
-        <div className="w-full flex items-center gap-1">
+        <div className="w-full flex items-center gap-0.5 border-t border-white/5 pt-1.5 mt-1">
           <input
             type="file"
             ref={fileInputRef}
@@ -184,16 +185,16 @@ export function FileExplorer({
           <Button
             variant="ghost"
             size="icon"
-            className="h-6 w-6"
+            className="h-7 w-7"
             onClick={handleCreateFile}
             title="Create New File"
           >
-            <Plus className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+            <Plus className="h-4 w-4 text-muted-foreground hover:text-foreground" />
           </Button>
           <Button
             variant="ghost"
             size="icon"
-            className="h-6 w-6"
+            className="h-7 w-7"
             onClick={handleUploadClick}
             title="Import/Upload File from Finder"
           >
@@ -202,7 +203,7 @@ export function FileExplorer({
           <Button
             variant="ghost"
             size="icon"
-            className="h-6 w-6"
+            className="h-7 w-7"
             onClick={() => {
               fetch('/api/open-folder', {
                 method: 'POST',
@@ -217,9 +218,9 @@ export function FileExplorer({
           <Button
             variant="ghost"
             size="icon"
-            className="h-6 w-6"
+            className="h-7 w-7"
             onClick={onRefresh}
-            title="Refresh files"
+            title="Refresh"
           >
             <RefreshCw className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
           </Button>

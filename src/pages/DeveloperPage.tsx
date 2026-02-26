@@ -89,15 +89,34 @@ export default function DeveloperPage() {
   }, [activeFileId, openFiles]);
 
   // Fetch file tree
-  const loadFiles = async () => {
+  const loadFiles = async (path: string = '.') => {
     try {
-      const res = await fetch('/api/files?path=.');
-      const data = await res.json();
-      setFiles(data.children ? data.children : [data]);
+      const res = await fetch(`/api/files?path=${encodeURIComponent(path)}`);
+      if (res.ok) {
+        const data = await res.json();
+        setFiles(data.children ? data.children : [data]);
+      }
     } catch (err) {
       console.error("Failed to load files:", err);
     }
   };
+
+  // Real-time File System Sync
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/fs`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'refresh') {
+        console.log("File system change detected, refreshing...", data.changes);
+        loadFiles();
+      }
+    };
+
+    return () => ws.close();
+  }, []);
 
   // Handle workspace change
   const handleChangeWorkspace = async () => {
@@ -108,14 +127,10 @@ export default function DeveloperPage() {
       const path = selectData.path;
       if (!path) return;
 
-      const res = await fetch('/api/files?path=' + encodeURIComponent(path));
-      if (res.ok) {
-        const data = await res.json();
-        setFiles(data.children ? data.children : [data]);
-        setOpenFiles([]); // Close all files
-        setActiveFileId(null);
-        setSelectedPath(null);
-      }
+      setOpenFiles([]); // Close all files
+      setActiveFileId(null);
+      setSelectedPath(null);
+      loadFiles(path);
     } catch (err) {
       console.error("Failed to change workspace:", err);
     }
@@ -240,15 +255,10 @@ export default function DeveloperPage() {
             )}
           >
             <div className="h-full relative">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="absolute top-1 right-12 h-6 w-6 z-10"
-                onClick={() => setTerminalExpanded(!terminalExpanded)}
-              >
-                {terminalExpanded ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
-              </Button>
-              <Terminal />
+              <Terminal
+                onExpand={() => setTerminalExpanded(!terminalExpanded)}
+                isExpanded={terminalExpanded}
+              />
             </div>
           </div>
         </div>

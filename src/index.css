@@ -100,6 +100,7 @@
 }
 
 @layer components {
+
   /* Panel styles */
   .ide-panel {
     @apply bg-card border border-border rounded-lg overflow-hidden;
@@ -115,7 +116,7 @@
 
   /* File tree styles */
   .file-tree-item {
-    @apply flex items-center gap-2 px-2 py-1.5 text-sm text-muted-foreground hover:bg-secondary/50 hover:text-foreground cursor-pointer rounded transition-colors;
+    @apply flex items-center gap-1.5 px-2 py-0 text-[11px] text-muted-foreground hover:bg-secondary/50 hover:text-foreground cursor-pointer rounded transition-colors;
   }
 
   .file-tree-item.active {
@@ -185,6 +186,7 @@
 }
 
 @layer utilities {
+
   /* Text gradient utility */
   .text-gradient-primary {
     @apply bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent;

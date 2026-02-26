@@ -1,11 +1,19 @@
-from fastapi import FastAPI, Request, UploadFile, File, Form
+from fastapi import FastAPI, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import os
 import subprocess
+import pty
+import fcntl
+import termios
+import struct
+import select
+import asyncio
+import signal
 from typing import List, Optional, Dict
+from watchfiles import awatch
 
 # Try to import google.generativeai, handle if missing
 try:
@@ -25,36 +33,134 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 from dotenv import load_dotenv
 load_dotenv()
 
-# Global state for terminal current working directory
+# Global state
 CURRENT_DIR = os.getcwd()
+TERM_PROCESS = None
+MASTER_FD = None
+terminal_lock = asyncio.Lock()
 
 # Configure GenAI if available
 if HAS_GENAI:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if api_key and api_key != "YOUR_GEMINI_API_KEY":
-        genai.configure(api_key=api_key)
-        try:
-            model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-            model = genai.GenerativeModel(model_name)
-        except:
-            model = None
-    else:
-        model = None
-else:
-    model = None
+# ... (rest of the code)
 
-class FileSaveRequest(BaseModel):
-    path: str
-    content: str
+# ... (other code)
 
-class TerminalRequest(BaseModel):
-    command: str
+@app.websocket("/ws/terminal")
+async def terminal_websocket(websocket: WebSocket):
+    global CURRENT_DIR, MASTER_FD, TERM_PROCESS
+    await websocket.accept()
+    logger.info(f"Terminal WebSocket connected. CWD: {CURRENT_DIR}")
+    
+    async def ensure_terminal():
+        global MASTER_FD, TERM_PROCESS
+        async with terminal_lock:
+            if MASTER_FD is None or TERM_PROCESS is None or TERM_PROCESS.poll() is not None:
+                logger.info("Initializing new PTY terminal shell...")
+                try:
+                    master_fd, slave_fd = pty.openpty()
+                    import platform
+                    shell = "/bin/zsh" if platform.system() == "Darwin" else "/bin/bash"
+                    
+                    # Set environment to encourage clean output
+                    env = os.environ.copy()
+                    env['TERM'] = 'xterm-mono'
+                    env['COLORTERM'] = ''
+                    env['LANG'] = 'en_US.UTF-8'
+                    env['PROMPT_EOL_MARK'] = '' # Disable Zsh partial line marker
+                    
+                    TERM_PROCESS = subprocess.Popen(
+                        [shell],
+                        stdin=slave_fd,
+                        stdout=slave_fd,
+                        stderr=slave_fd,
+                        cwd=CURRENT_DIR,
+                        env=env,
+                        start_new_session=True
+                    )
+                    os.close(slave_fd)
+                    
+                    # Set non-blocking
+                    fl = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+                    fcntl.fcntl(master_fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                    MASTER_FD = master_fd
+                    logger.info(f"PTY initialized with FD: {MASTER_FD}")
+                except Exception as e:
+                    logger.error(f"Failed to initialize PTY: {e}")
+                    return False
+            return True
 
-class AgentRequest(BaseModel):
-    prompt: str
+    await ensure_terminal()
+
+    async def read_from_pty():
+        while True:
+            try:
+                # We need to read even if MASTER_FD is None (it shouldn't be for long)
+                # But let's localise it
+                fd = MASTER_FD
+                if fd is not None:
+                    try:
+                        data = os.read(fd, 4096)
+                        if data:
+                            await websocket.send_text(data.decode('utf-8', errors='replace'))
+                    except BlockingIOError:
+                        await asyncio.sleep(0.02)
+                        continue
+                else:
+                    await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Error reading from PTY: {e}")
+                break
+            await asyncio.sleep(0.01)
+
+    read_task = asyncio.create_task(read_from_pty())
+    
+    try:
+        while True:
+            msg = await websocket.receive_text()
+            if msg:
+                if MASTER_FD is None:
+                    await ensure_terminal()
+                
+                fd = MASTER_FD
+                if fd is not None:
+                    try:
+                        os.write(fd, msg.encode())
+                    except Exception as e:
+                        logger.error(f"Error writing to PTY: {e}")
+            await asyncio.sleep(0.01)
+    except WebSocketDisconnect:
+        logger.info("Terminal WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"Terminal WebSocket error: {e}")
+    finally:
+        read_task.cancel()
+
+# --- WebSocket File System Events ---
+
+@app.websocket("/ws/fs")
+async def fs_websocket(websocket: WebSocket):
+    global CURRENT_DIR
+    await websocket.accept()
+    
+    try:
+        async for changes in awatch(CURRENT_DIR):
+            # Send a simple 'refresh' signal or more detailed info
+            await websocket.send_json({"type": "refresh", "changes": list(changes)})
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"FS Watcher error: {e}")
+
+# --- REST Endpoints ---
 
 @app.get("/api/files")
 def list_files(path: Optional[str] = None):
@@ -68,7 +174,7 @@ def list_files(path: Optional[str] = None):
     
     base = CURRENT_DIR
     if not os.path.exists(base):
-        return JSONResponse(status_code=404, content={"error": "Path not found"})
+        return JSONResponse(status_code=404, content={"error": f"Path not found: {base}"})
     
     def build_tree(p):
         try:
@@ -78,8 +184,24 @@ def list_files(path: Optional[str] = None):
             
         children = []
         for f in entries:
+            # Skip hidden files
+            if f.startswith('.') and f not in ['.env', '.gitignore']:
+                continue
+            
             full_path = os.path.join(p, f)
             if os.path.isdir(full_path):
+                # Don't recurse too deep for the initial load if you want speed
+                # but for this app we'll do it. Maybe limit to node_modules/git?
+                if f in ['node_modules', '.git', '__pycache__', '.venv']:
+                    children.append({
+                        "id": full_path,
+                        "name": f,
+                        "type": "folder",
+                        "path": full_path,
+                        "children": [] # Lazy loading if needed, but here we just mark as opaque
+                    })
+                    continue
+                    
                 child_data = build_tree(full_path)
                 if child_data:
                     children.append(child_data)
@@ -116,7 +238,10 @@ def list_files(path: Optional[str] = None):
 @app.get("/api/file")
 def read_file(path: str):
     if not os.path.exists(path):
-        return JSONResponse(status_code=404, content={"error": "File not found"})
+        # Try relative to CURRENT_DIR
+        path = os.path.join(CURRENT_DIR, path)
+        if not os.path.exists(path):
+            return JSONResponse(status_code=404, content={"error": "File not found"})
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -126,8 +251,14 @@ def read_file(path: str):
 
 @app.post("/api/file")
 def save_file(req: FileSaveRequest):
+    path = req.path
+    if not os.path.isabs(path):
+        path = os.path.join(CURRENT_DIR, path)
+    
     try:
-        with open(req.path, "w", encoding="utf-8") as f:
+        # Create directories if they don't exist
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             f.write(req.content)
         return {"success": True}
     except Exception as e:
@@ -135,10 +266,11 @@ def save_file(req: FileSaveRequest):
 
 @app.post("/api/terminal")
 def run_terminal(req: TerminalRequest):
+    """Fallback for non-ws terminal or specific scripts"""
     global CURRENT_DIR
     command = req.command.strip()
     
-    # Handle cd command specifically
+    # Handle cd command specifically for the tracked dir
     if command.startswith("cd "):
         target_dir = command[3:].strip()
         new_dir = os.path.abspath(os.path.join(CURRENT_DIR, target_dir))
@@ -159,7 +291,6 @@ def run_terminal(req: TerminalRequest):
             }
 
     try:
-        # Run command in the tracked, persistent CURRENT_DIR
         result = subprocess.run(
             req.command, 
             shell=True, 
@@ -179,7 +310,12 @@ def run_terminal(req: TerminalRequest):
 @app.post("/api/open-folder")
 def open_folder(req: Dict[str, str]):
     path = req.get("path")
-    if not path or not os.path.exists(path):
+    if not path:
+        path = CURRENT_DIR
+    elif not os.path.isabs(path):
+        path = os.path.join(CURRENT_DIR, path)
+        
+    if not os.path.exists(path):
         return JSONResponse(status_code=404, content={"error": "Path not found"})
     
     try:
@@ -198,7 +334,6 @@ def open_folder(req: Dict[str, str]):
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), path: Optional[str] = Form(None)):
     global CURRENT_DIR
-    # Use provided path (folder) or default to CURRENT_DIR
     target_dir = path if path else CURRENT_DIR
     if not os.path.isabs(target_dir):
         target_dir = os.path.join(CURRENT_DIR, target_dir)
@@ -223,6 +358,14 @@ def select_workspace_folder():
             cmd = 'osascript -e "POSIX path of (choose folder with prompt \\"Select Workspace Folder\\")"'
             result = subprocess.check_output(cmd, shell=True, text=True).strip()
             if result:
+                global CURRENT_DIR
+                CURRENT_DIR = result
+                # Kill old terminal process to spawn new one in new dir
+                global TERM_PROCESS, MASTER_FD
+                if TERM_PROCESS:
+                    TERM_PROCESS.terminate()
+                    TERM_PROCESS = None
+                    MASTER_FD = None
                 return {"path": result}
         return {"error": "Native selector only available on macOS"}
     except Exception as e:
@@ -276,3 +419,4 @@ def run_agent(req: AgentRequest):
         return result
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
