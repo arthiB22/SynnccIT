@@ -4,7 +4,9 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
-load_dotenv()
+
+dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+load_dotenv(dotenv_path)
 
 class CodeReviewState(TypedDict):
     """State that goes through nodes of our graph"""
@@ -16,8 +18,8 @@ class CodeReviewState(TypedDict):
 class SimpleCodeReviewAgent:
     def __init__(self):
         self.llm = ChatGoogleGenerativeAI(
-            google_api_key=os.getenv("GEMINI_API_KEY"),
-            model=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+            google_api_key=os.getenv("GOOGLE_API_KEY"),
+            model=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash"),
             temperature=0,
         )
 

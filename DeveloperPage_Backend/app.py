@@ -13,11 +13,15 @@ from dotenv import load_dotenv
 env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../.env'))
 load_dotenv(env_path)
 import subprocess
-import pty
-import fcntl
-import termios
-import struct
-import select
+try:
+    import pty
+    import fcntl
+    import termios
+    import struct
+    import select
+    HAS_PTY = True
+except ImportError:
+    HAS_PTY = False
 from typing import List, Optional, Dict
 from watchfiles import awatch
 
@@ -136,6 +140,10 @@ async def terminal_websocket(websocket: WebSocket):
         global MASTER_FD, TERM_PROCESS
         async with terminal_lock:
             if MASTER_FD is None or TERM_PROCESS is None or TERM_PROCESS.poll() is not None:
+                if not HAS_PTY:
+                    await websocket.send_text("\\r\\n\\x1b[31m[ERROR] PTY terminal is not supported natively on Windows in this implementation.\\x1b[0m\\r\\n")
+                    return False
+                
                 logger.info("Initializing new PTY terminal shell...")
                 try:
                     master_fd, slave_fd = pty.openpty()
@@ -167,6 +175,7 @@ async def terminal_websocket(websocket: WebSocket):
                     logger.info(f"PTY initialized with FD: {MASTER_FD}")
                 except Exception as e:
                     logger.error(f"Failed to initialize PTY: {e}")
+                    await websocket.send_text(f"\\r\\n\\x1b[31m[ERROR] Failed to init terminal: {e}\\x1b[0m\\r\\n")
                     return False
             return True
 

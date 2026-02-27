@@ -2,6 +2,10 @@ from fastapi import FastAPI
 from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+import os
+
+dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+load_dotenv(dotenv_path)
 
 from schema import CodeReviewRequest, ExecuteCodeRequest
 from agent import SimpleCodeReviewAgent
@@ -10,17 +14,12 @@ from history import add_history_record, get_all_history
 import uuid
 from datetime import datetime
 
-
-load_dotenv()
-
-
-load_dotenv()
 agent = SimpleCodeReviewAgent()
 app = FastAPI()
+
 @app.options("/review")
 def review_options():
     return {}
-
 @app.options("/execute")
 def execute_options():
     return {}
