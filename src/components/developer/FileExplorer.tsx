@@ -12,17 +12,17 @@ import {
   ExternalLink,
   Upload,
   Plus,
-  FolderSync,
   FolderSearch,
   Terminal,
+  Sparkles,
 } from 'lucide-react';
-
-const BACKEND_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-  ? ''
-  : 'http://localhost:8000';
 import { cn } from '@/lib/utils';
 import { FileNode } from '@/types/api';
 import { Button } from '@/components/ui/button';
+
+// Detect environment: true when running locally with the backend available
+const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+const BACKEND_URL = IS_LOCAL ? '' : '';
 
 const getFileIcon = (name: string, isOpen?: boolean) => {
   const ext = name.split('.').pop()?.toLowerCase();
@@ -124,6 +124,7 @@ interface FileExplorerProps {
   onRefresh?: () => void;
   onFileUpload?: (file: File) => void;
   onWorkspaceChange?: () => void;
+  onNativeWorkspacePick?: (dirHandle: FileSystemDirectoryHandle) => void;
 }
 
 export function FileExplorer({
@@ -132,7 +133,8 @@ export function FileExplorer({
   files = [],
   onRefresh,
   onFileUpload,
-  onWorkspaceChange
+  onWorkspaceChange,
+  onNativeWorkspacePick,
 }: FileExplorerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -146,6 +148,39 @@ export function FileExplorer({
       onFileUpload(file);
     }
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // Native workspace picker — uses File System Access API (works everywhere, no backend needed)
+  const handleChangeRoot = async () => {
+    // If browser supports the File System Access API, use it (works on Vercel too)
+    if ('showDirectoryPicker' in window) {
+      try {
+        const dirHandle = await (window as any).showDirectoryPicker({ mode: 'read' });
+        if (onNativeWorkspacePick) {
+          onNativeWorkspacePick(dirHandle);
+        } else if (onWorkspaceChange) {
+          // Fallback: call backend-based handler when running locally
+          onWorkspaceChange();
+        }
+      } catch (err: any) {
+        // User cancelled or permission denied — silently ignore
+        if (err.name !== 'AbortError') console.warn('Directory picker error:', err);
+      }
+    } else if (IS_LOCAL && onWorkspaceChange) {
+      // Older browsers on local: fall back to backend osascript dialog
+      onWorkspaceChange();
+    } else {
+      alert('Your browser does not support directory picking. Please use Chrome or Edge.');
+    }
+  };
+
+  const handleOpenTerminal = () => {
+    if (IS_LOCAL) {
+      fetch(`${BACKEND_URL}/api/open-terminal`, { method: 'POST' })
+        .catch(() => alert('Could not reach local backend to open terminal.'));
+    } else {
+      alert('Opening a native terminal is only available when running locally. The in-page terminal below is available in all environments.');
+    }
   };
 
   const handleCreateFile = async () => {
@@ -177,14 +212,25 @@ export function FileExplorer({
             className="hidden"
             onChange={handleFileChange}
           />
+          {/* Change Root — uses browser-native showDirectoryPicker, works everywhere */}
           <Button
             variant="ghost"
             size="icon"
             className="h-7 w-7"
-            onClick={onWorkspaceChange}
-            title="Select Workspace Folder from Finder"
+            onClick={handleChangeRoot}
+            title="Select Workspace Folder"
           >
             <FolderSearch className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+          </Button>
+          {/* AI Workspace button — placeholder for future integration */}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 group"
+            title="AI Workspace Assistant (Coming Soon)"
+            onClick={() => { }}
+          >
+            <Sparkles className="h-3.5 w-3.5 text-primary/40 group-hover:text-primary transition-colors" />
           </Button>
           <Button
             variant="ghost"
@@ -195,6 +241,7 @@ export function FileExplorer({
           >
             <Plus className="h-4 w-4 text-muted-foreground hover:text-foreground" />
           </Button>
+          {/* Upload — uses browser-native <input type="file">, works everywhere */}
           <Button
             variant="ghost"
             size="icon"
@@ -204,14 +251,13 @@ export function FileExplorer({
           >
             <Upload className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
           </Button>
+          {/* Open Native Terminal — local only; shows info message on Vercel */}
           <Button
             variant="ghost"
             size="icon"
             className="h-7 w-7"
-            onClick={() => {
-              fetch(`${BACKEND_URL}/api/open-terminal`, { method: 'POST' });
-            }}
-            title="Open Native Terminal from Finder"
+            onClick={handleOpenTerminal}
+            title={IS_LOCAL ? 'Open Native Terminal' : 'Open Native Terminal (local only)'}
           >
             <Terminal className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
           </Button>
@@ -220,13 +266,15 @@ export function FileExplorer({
             size="icon"
             className="h-7 w-7"
             onClick={() => {
-              fetch(`${BACKEND_URL}/api/open-folder`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path: '.' }),
-              });
+              if (IS_LOCAL) {
+                fetch(`${BACKEND_URL}/api/open-folder`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ path: '.' }),
+                });
+              }
             }}
-            title="Open in Finder/Explorer"
+            title="Open in Finder/Explorer (local only)"
           >
             <ExternalLink className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
           </Button>

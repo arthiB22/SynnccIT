@@ -55,8 +55,44 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- Unified Backend Integration ---
+import sys
+from pathlib import Path
 
-# Global state
+# Add TestingPage_Backend and AgentPage_Backend to path
+testing_backend_path = Path(__file__).resolve().parent.parent / "TestingPage_Backend"
+agent_backend_path = Path(__file__).resolve().parent.parent / "AgentPage_Backend"
+
+if str(testing_backend_path) not in sys.path:
+    sys.path.insert(0, str(testing_backend_path))
+if str(agent_backend_path) not in sys.path:
+    sys.path.insert(0, str(agent_backend_path))
+
+# Import Routers
+try:
+    from routers.testcase_router import testcase_router
+    from routers.simulation_router import simulation_router
+    from routers.flowchart_router import flowchart_router
+    from routers.ai_router import ai_router
+    
+    # Include testing routers
+    app.include_router(testcase_router, prefix="/api/testcases", tags=["Test Cases"])
+    app.include_router(simulation_router, prefix="/api/simulation", tags=["Simulation"])
+    app.include_router(flowchart_router, prefix="/api/flowchart", tags=["Flowchart"])
+    app.include_router(ai_router, prefix="/api/ai", tags=["AI Features"])
+    
+    HAS_TESTING_BACKEND = True
+    logger.info("Successfully merged TestingPage routers.")
+except ImportError as e:
+    logger.error(f"Failed to import TestingPage routers: {e}")
+    HAS_TESTING_BACKEND = False
+
+try:
+    from router import agent_router as agent_page_router
+    app.include_router(agent_page_router, prefix="/api/agent-standalone", tags=["Agent Page"])
+    logger.info("Successfully merged AgentPage router.")
+except ImportError as e:
+    logger.error(f"Failed to import AgentPage router: {e}")
 
 # Global state
 CURRENT_DIR = os.getcwd()

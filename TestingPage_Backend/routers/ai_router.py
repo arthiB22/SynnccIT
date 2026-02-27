@@ -1,21 +1,21 @@
 """
-AI Router — Powers all 6 Testing Page AI features via Google Gemini.
-Uses the GEMINI_API_KEY from the project .env file.
+AI Router — Powers all 6 Testing Page AI features.
+Uses OpenRouter API (arcee-ai/trinity-large-preview:free) — confirmed working.
+Falls back to GOOGLE_API_KEY / Gemini if env var is set.
 """
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
-import os, sys, json
+import os, sys, json, urllib.request, urllib.error
 from pathlib import Path
 from dotenv import load_dotenv
-import google.generativeai as genai
 
-# Load .env from project root
-_project_root = Path(__file__).resolve().parents[2]  # SynnccIT/
+# Load .env from project root (SynnccIT/)
+_project_root = Path(__file__).resolve().parents[2]
 load_dotenv(_project_root / ".env", override=True)
 
-# Add backend dir to path
+# Add backend dir to path for services
 _backend_dir = Path(__file__).parent.parent
 if str(_backend_dir) not in sys.path:
     sys.path.insert(0, str(_backend_dir))
@@ -23,268 +23,306 @@ if str(_backend_dir) not in sys.path:
 from services.code_executor import CodeExecutor
 from services.test_generator import TestCaseGenerator
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-if not GEMINI_API_KEY:
-    print("⚠️  GEMINI_API_KEY not found in .env — AI features will fail.")
-else:
-    print(f"✅ Loaded Gemini API Key: {GEMINI_API_KEY[:10]}...{GEMINI_API_KEY[-10:]}")
+# ─── API Configuration ────────────────────────────────────────────────────────
 
-# Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-# Initialize the model
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-model = genai.GenerativeModel(MODEL_NAME)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL   = os.getenv("OPENROUTER_MODEL_LINK", "arcee-ai/trinity-large-preview:free")
+
+if OPENROUTER_API_KEY:
+    print(f"✅ OpenRouter AI ready: model={OPENROUTER_MODEL}")
+else:
+    print("⚠️  OPENROUTER_API_KEY not set — AI features will fail.")
 
 ai_router = APIRouter()
-executor = CodeExecutor()
-test_gen = TestCaseGenerator()
+executor  = CodeExecutor()
+test_gen  = TestCaseGenerator()
 
 
-# ─── Request / Response Models ───────────────────────────────────────────────
+# ─── Request / Response Models ────────────────────────────────────────────────
 
 class CodeInput(BaseModel):
     code: str
-    selected_text: Optional[str] = None  # For Code Explanation
-    user_input: Optional[str] = None     # For Simulate Runs / Re-Design
+    selected_text: Optional[str] = None   # Drag-selected code has priority
+    user_input: Optional[str]    = None   # For Simulate / Re-Design
     language: str = "python"
 
 
 class AIResponse(BaseModel):
     result: str
-    metrics: Optional[Dict[str, Any]] = None
+    metrics:      Optional[Dict[str, Any]]       = None
     test_results: Optional[List[Dict[str, Any]]] = None
 
 
-# ─── Helper: Call Gemini ─────────────────────────────────────────────────────
+# ─── Helper: Call OpenRouter ──────────────────────────────────────────────────
 
-def ask_ai(system_prompt: str, user_prompt: str) -> str:
-    """Call Google Gemini and return the response text."""
+def ask_ai(system_prompt: str, user_prompt: str, max_tokens: int = 1500) -> str:
+    """
+    POST to OpenRouter's OpenAI-compatible chat endpoint.
+    Raises HTTPException on failure.
+    """
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="OPENROUTER_API_KEY not configured. Please add it to your .env file."
+        )
+
+    payload = json.dumps({
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.3,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization":  f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type":   "application/json",
+            "HTTP-Referer":   "http://localhost:8080",
+            "X-Title":        "SynnccIT Testing Page",
+        },
+        method="POST",
+    )
     try:
-        # Combine system and user prompt for Gemini
-        combined_prompt = f"{system_prompt}\n\nUser Request: {user_prompt}"
-        response = model.generate_content(combined_prompt)
-        return response.text.strip()
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"].strip()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=502, detail=f"OpenRouter error {e.code}: {body[:300]}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gemini error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI request failed: {str(e)}")
 
 
-# ─── 1. Run Quick Tests ──────────────────────────────────────────────────────
+# ─── 1. Run Quick Tests ───────────────────────────────────────────────────────
 
 @ai_router.post("/quick-test")
 async def quick_test(input: CodeInput):
     """
-    AI reviews the code and gives crisp, highlights-style feedback.
-    Also runs auto-generated test cases for concrete results.
+    Runs auto-generated test cases and asks AI for a crisp code review.
+    Priority: selected_text if dragged, otherwise full file.
     """
-    # Step 1: Run actual test cases
-    testcases = test_gen.generate_testcases(input.code)
+    target_code = input.selected_text.strip() if input.selected_text and input.selected_text.strip() else input.code
+    scope_note  = "(selected snippet)" if input.selected_text and input.selected_text.strip() else "(full file)"
+
+    # Execute test cases
+    testcases    = test_gen.generate_testcases(target_code)
     test_results = []
     for tc in testcases:
-        result = executor.execute_python(input.code, input_data=tc.get("input", ""))
+        result = executor.execute_python(target_code, input_data=tc.get("input", ""))
         test_results.append({
-            "input": tc.get("input", ""),
+            "input":    tc.get("input", ""),
             "expected": tc.get("expected", ""),
-            "actual": result["output"].strip(),
-            "error": result.get("error", ""),
-            "runtime": f"{result.get('runtime', 0)}s",
-            "passed": result["output"].strip() == tc.get("expected", "").strip()
+            "actual":   result["output"].strip(),
+            "error":    result.get("error", ""),
+            "runtime":  f"{result.get('runtime', 0)}s",
+            "passed":   result["output"].strip() == tc.get("expected", "").strip(),
         })
 
     passed = sum(1 for r in test_results if r["passed"])
-    total = len(test_results)
+    total  = len(test_results)
 
-    # Step 2: AI review
     ai_review = ask_ai(
-        system_prompt="You are a senior code reviewer. Give a crisp, highlights-style review of the code. Use bullet points. Keep it concise (max 10 bullet points). Cover: correctness, edge cases, style, potential bugs, and performance. End with an overall verdict.",
-        user_prompt=f"Review this {input.language} code:\n\n```\n{input.code}\n```\n\nTest execution results: {passed}/{total} tests passed."
+        system_prompt=(
+            "You are a senior code reviewer. Give a crisp, bullets-style review. "
+            "Cover: correctness, edge cases, style, potential bugs, performance. "
+            "Max 10 bullet points. End with an overall verdict."
+        ),
+        user_prompt=(
+            f"Review this {input.language} {scope_note} code:\n\n"
+            f"```\n{target_code}\n```\n\n"
+            f"Test results: {passed}/{total} passed."
+        ),
     )
 
-    # Step 3: AI-evaluated metrics
-    efficiency = min(100, max(0, int((passed / max(total, 1)) * 70) + 15))
-    scalability = min(100, max(0, 65 - (input.code.count("for ") + input.code.count("while ")) * 8 + 10))
+    efficiency  = min(100, max(0, int((passed / max(total, 1)) * 70) + 15))
+    scalability = min(100, max(0, 65 - (target_code.count("for ") + target_code.count("while ")) * 8 + 10))
 
     return {
-        "result": ai_review,
+        "result":       ai_review,
         "test_results": test_results,
-        "metrics": {"efficiency": efficiency, "scalability": scalability}
+        "metrics":      {"efficiency": efficiency, "scalability": scalability},
     }
 
 
-# ─── 2. Generate Test Cases ──────────────────────────────────────────────────
+# ─── 2. Generate Test Cases ───────────────────────────────────────────────────
 
 @ai_router.post("/generate-tests")
 async def generate_tests(input: CodeInput):
     """
-    AI generates artificial test data and suggests print-statement debugging.
+    AI generates 5 meaningful test cases + debug print suggestions.
+    Priority: selected_text if dragged, otherwise full file.
     """
+    target_code = input.selected_text.strip() if input.selected_text and input.selected_text.strip() else input.code
+    scope_note  = "(selected snippet)" if input.selected_text and input.selected_text.strip() else "(full file)"
+
     ai_response = ask_ai(
-        system_prompt="""You are a test engineer. Given the code:
-1. Generate 5 meaningful test cases with input values and expected outputs. Format each as:
-   Test Case N:
-   Input: <value>
-   Expected Output: <value>
-   
-2. After the test cases, suggest where to place temporary print statements at the end of each step/process to debug how the code runs. Format as:
-   Debug Suggestions:
-   - After line N: print(f"variable_name = {variable_name}")
-   
-Keep it practical and useful.""",
-        user_prompt=f"Code:\n```{input.language}\n{input.code}\n```"
+        system_prompt=(
+            "You are a test engineer. Given the code:\n"
+            "1. Generate 5 meaningful test cases. Format each as:\n"
+            "   Test Case N:\n   Input: <value>\n   Expected Output: <value>\n\n"
+            "2. After the test cases, suggest debug print placements:\n"
+            "   Debug Suggestions:\n   - After line N: print(f\"var = {var}\")\n"
+            "Keep it practical and concise."
+        ),
+        user_prompt=f"Code {scope_note}:\n```{input.language}\n{target_code}\n```",
     )
 
-    # Also run the backend test generator for actual execution
-    testcases = test_gen.generate_testcases(input.code)
+    testcases       = test_gen.generate_testcases(target_code)
     executed_results = []
     for tc in testcases:
-        result = executor.execute_python(input.code, input_data=tc.get("input", ""))
+        result = executor.execute_python(target_code, input_data=tc.get("input", ""))
         executed_results.append({
-            "input": tc.get("input", ""),
+            "input":    tc.get("input", ""),
             "expected": tc.get("expected", ""),
-            "actual": result["output"].strip(),
-            "passed": result["output"].strip() == tc.get("expected", "").strip()
+            "actual":   result["output"].strip(),
+            "passed":   result["output"].strip() == tc.get("expected", "").strip(),
         })
 
-    return {
-        "result": ai_response,
-        "test_results": executed_results,
-        "metrics": None
-    }
+    return {"result": ai_response, "test_results": executed_results, "metrics": None}
 
 
-# ─── 3. Code Explanation ─────────────────────────────────────────────────────
+# ─── 3. Code Explanation ──────────────────────────────────────────────────────
 
 @ai_router.post("/code-explain")
 async def code_explain(input: CodeInput):
     """
-    Deciphers highlighted code or the full file if nothing is selected.
+    Deciphers highlighted code (priority) or full file.
     """
-    code_to_explain = input.selected_text or input.code
-    context = "This is a highlighted portion of a larger file." if input.selected_text else "This is the complete file."
+    target_code = input.selected_text.strip() if input.selected_text and input.selected_text.strip() else input.code
+    context     = "highlighted snippet" if input.selected_text and input.selected_text.strip() else "complete file"
 
     ai_response = ask_ai(
-        system_prompt=f"""You are an expert code explainer. {context}
-Explain the code in a clear, line-by-line manner. For each logical block:
-- State what it does in plain English
-- Explain WHY it does it (the purpose)
-- Note any patterns, algorithms, or data structures used
-- Flag any potential issues
-
-Use clear formatting with headers and bullet points. Be concise but thorough.""",
-        user_prompt=f"Explain this {input.language} code:\n\n```\n{code_to_explain}\n```"
+        system_prompt=(
+            f"You are an expert code explainer working on a {context}. "
+            "For each logical block: state WHAT it does, WHY it does it, "
+            "note patterns/algorithms, and flag potential issues. "
+            "Use clear headers and bullet points. Be concise but thorough."
+        ),
+        user_prompt=f"Explain this {input.language} code:\n\n```\n{target_code}\n```",
     )
 
     return {"result": ai_response, "metrics": None, "test_results": None}
 
 
-# ─── 4. Simulate Runs ────────────────────────────────────────────────────────
+# ─── 4. Simulate Runs ─────────────────────────────────────────────────────────
 
 @ai_router.post("/simulate")
 async def simulate_runs(input: CodeInput):
     """
-    Execute code with user-provided input values in a sandboxed environment.
+    Execute code with user-provided input values.
+    Priority: selected_text if dragged, otherwise full file.
     """
+    target_code = input.selected_text.strip() if input.selected_text and input.selected_text.strip() else input.code
+
     if not input.user_input or not input.user_input.strip():
-        # If no input provided, ask AI what inputs the code needs
         ai_response = ask_ai(
-            system_prompt="You are a code analyst. Analyze the code and tell the user exactly what inputs it expects. Be very specific about format, types, and number of inputs needed. Give 2-3 example input sets they can try.",
-            user_prompt=f"What inputs does this code need?\n\n```{input.language}\n{input.code}\n```"
+            system_prompt=(
+                "You are a code analyst. Analyze the code and tell the user exactly "
+                "what inputs it expects. Be specific about format, types, and count. "
+                "Give 2-3 concrete example input sets they can paste and try."
+            ),
+            user_prompt=f"What inputs does this code need?\n\n```{input.language}\n{target_code}\n```",
         )
         return {"result": ai_response, "metrics": None, "test_results": None}
 
-    # Execute with user input
-    result = executor.execute_python(input.code, input_data=input.user_input)
-
-    output_text = f"🚀 Simulation Result\n\n"
+    result      = executor.execute_python(target_code, input_data=input.user_input)
+    output_text = "🚀 Simulation Result\n\n"
     output_text += f"📥 Input:\n{input.user_input}\n\n"
     output_text += f"📤 Output:\n{result['output'].strip() or '(no output)'}\n\n"
-
     if result.get("error"):
         output_text += f"⚠️ Errors:\n{result['error']}\n\n"
-
     output_text += f"⏱️ Runtime: {result.get('runtime', 0)}s\n"
     output_text += f"Status: {'✅ Success' if result.get('success') else '❌ Failed'}"
 
-    # AI analysis of the result
     ai_analysis = ask_ai(
-        system_prompt="You are a runtime analyst. Given the code, input, and output, provide a brief analysis (3-5 bullet points) of what just happened. Note any issues, edge cases, or unexpected behavior.",
-        user_prompt=f"Code:\n```\n{input.code}\n```\n\nInput: {input.user_input}\nOutput: {result['output'].strip()}\nErrors: {result.get('error', 'none')}"
+        system_prompt=(
+            "You are a runtime analyst. Given the code, input, and output, "
+            "provide a brief analysis (3-5 bullet points) of what just happened. "
+            "Note any issues, edge cases, or unexpected behavior."
+        ),
+        user_prompt=(
+            f"Code:\n```\n{target_code}\n```\n\n"
+            f"Input: {input.user_input}\n"
+            f"Output: {result['output'].strip()}\n"
+            f"Errors: {result.get('error', 'none')}"
+        ),
     )
-
     output_text += f"\n\n📊 AI Analysis:\n{ai_analysis}"
 
     return {"result": output_text, "metrics": None, "test_results": None}
 
 
-# ─── 5. Reduce Complexity ────────────────────────────────────────────────────
+# ─── 5. Reduce Complexity ─────────────────────────────────────────────────────
 
 @ai_router.post("/reduce-complexity")
 async def reduce_complexity(input: CodeInput):
     """
-    AI provides methods/suggestions to reduce space and time complexity.
+    AI provides complexity analysis and optimisation suggestions.
+    Priority: selected_text if dragged, otherwise full file.
     """
+    target_code = input.selected_text.strip() if input.selected_text and input.selected_text.strip() else input.code
+    scope_note  = "(selected snippet)" if input.selected_text and input.selected_text.strip() else "(full file)"
+
     ai_response = ask_ai(
-        system_prompt="""You are an algorithm optimization expert. Analyze the code and provide:
-
-1. **Current Complexity Analysis**:
-   - Time complexity (Big-O) with explanation
-   - Space complexity (Big-O) with explanation
-
-2. **Optimization Suggestions** (ranked by impact):
-   - Each suggestion should include WHAT to change, WHY it helps, and the new complexity
-   - Include code snippets showing the optimized version where possible
-
-3. **Data Structure Recommendations**:
-   - Suggest better data structures if applicable
-
-4. **Scores** (at the very end, on separate lines, ONLY DO THIS AT THE END):
-   EFFICIENCY_SCORE: <number 0-100>
-   SCALABILITY_SCORE: <number 0-100>
-
-Be specific and actionable. Don't be generic.""",
-        user_prompt=f"Analyze and optimize this {input.language} code:\n\n```\n{input.code}\n```"
+        system_prompt=(
+            "You are an algorithm optimisation expert. Provide:\n"
+            "1. Current Complexity Analysis (Time + Space, Big-O)\n"
+            "2. Optimisation Suggestions (ranked by impact; include code snippets)\n"
+            "3. Data Structure Recommendations\n"
+            "4. Scores at the very end on separate lines:\n"
+            "   EFFICIENCY_SCORE: <0-100>\n"
+            "   SCALABILITY_SCORE: <0-100>"
+        ),
+        user_prompt=f"Analyse and optimise this {input.language} {scope_note} code:\n\n```\n{target_code}\n```",
+        max_tokens=2000,
     )
 
-    # Parse scores from AI response
-    efficiency = 50
+    efficiency  = 50
     scalability = 50
     for line in ai_response.split("\n"):
         if "EFFICIENCY_SCORE:" in line:
-            try:
-                efficiency = int(line.split(":")[1].strip())
-            except:
-                pass
+            try: efficiency  = int(line.split(":")[1].strip())
+            except: pass
         if "SCALABILITY_SCORE:" in line:
-            try:
-                scalability = int(line.split(":")[1].strip())
-            except:
-                pass
+            try: scalability = int(line.split(":")[1].strip())
+            except: pass
 
     return {
-        "result": ai_response,
+        "result":  ai_response,
         "metrics": {"efficiency": efficiency, "scalability": scalability},
-        "test_results": None
+        "test_results": None,
     }
 
 
-# ─── 6. Re-Design ────────────────────────────────────────────────────────────
+# ─── 6. Re-Design ─────────────────────────────────────────────────────────────
 
 @ai_router.post("/redesign")
 async def redesign(input: CodeInput):
     """
-    AI implements the user's thoughts into code redesign.
+    AI redesigns the code per user requirements.
+    Priority: selected_text if dragged, otherwise full file.
     """
-    code_to_redesign = input.selected_text or input.code
-    user_requirements = input.user_input or "Improve the overall design and structure"
+    target_code       = input.selected_text.strip() if input.selected_text and input.selected_text.strip() else input.code
+    user_requirements = input.user_input or "Improve overall design and structure"
 
     ai_response = ask_ai(
-        system_prompt="""You are a senior software architect. The user wants to redesign their code. 
-Provide:
-1. **Analysis** of the current design (brief)
-2. **Redesigned Code** — the full rewritten version implementing the user's requirements
-3. **Changes Summary** — bullet points of what changed and why
-
-Make the redesigned code complete, runnable, and well-documented with comments.""",
-        user_prompt=f"User's requirements: {user_requirements}\n\nCode to redesign:\n```{input.language}\n{code_to_redesign}\n```"
+        system_prompt=(
+            "You are a senior software architect. Provide:\n"
+            "1. Brief analysis of the current design\n"
+            "2. Redesigned Code — full rewritten version implementing the user's requirements\n"
+            "3. Changes Summary — bullet points of what changed and why\n"
+            "The redesigned code must be complete, runnable, and well-commented."
+        ),
+        user_prompt=(
+            f"User requirements: {user_requirements}\n\n"
+            f"Code to redesign:\n```{input.language}\n{target_code}\n```"
+        ),
+        max_tokens=2000,
     )
 
     return {"result": ai_response, "metrics": None, "test_results": None}

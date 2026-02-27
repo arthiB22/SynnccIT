@@ -26,12 +26,21 @@ import { CodeEditor } from '@/components/developer/CodeEditor';
 import { Terminal } from '@/components/developer/Terminal';
 import { FileNode, OpenFile } from '@/types/api';
 
-const TESTING_API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-  ? '/testing-api'
-  : 'http://localhost:8001';
-const BACKEND_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-  ? ''
-  : 'http://localhost:8000';
+const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+const BACKEND_URL = '';   // Always use Vite proxy in local dev
+
+// Native mode: map virtual paths → FileSystemFileHandle for read/write
+const nativeFileHandles = new Map<string, FileSystemFileHandle>();
+
+function detectLanguage(name: string): string {
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  const map: Record<string, string> = {
+    ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
+    py: 'python', json: 'json', md: 'markdown', css: 'css', html: 'html',
+    yaml: 'yaml', yml: 'yaml', sh: 'shell', txt: 'text',
+  };
+  return map[ext] || ext || 'text';
+}
 
 const actionButtons = [
   { id: 'quick-test', label: 'Run Quick Tests', icon: Play, description: 'AI reviews code and gives crisp feedback' },
@@ -47,60 +56,106 @@ export default function TestingPage() {
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [terminalExpanded, setTerminalExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'output' | 'terminal'>('output');
+
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [files, setFiles] = useState<FileNode[]>([]);
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
 
-  // AI State
+  // AI state
   const [selectedAction, setSelectedAction] = useState<string | null>(null);
   const [aiOutput, setAiOutput] = useState<string>('');
   const [aiLoading, setAiLoading] = useState(false);
   const [userInput, setUserInput] = useState('');
   const [metrics, setMetrics] = useState({ efficiency: 0, scalability: 0 });
+
+  // Ref to the textarea so we can read the actual drag-selection
+  const editorTextareaRef = useRef<HTMLTextAreaElement>(null);
   const outputRef = useRef<HTMLDivElement>(null);
 
-  // --- File Management (reuses DeveloperPage backend via proxy) ---
+  // Native mode flag
+  const isNativeMode = useRef(false);
+
+  // ─── File Selection ──────────────────────────────────────────────────────
   const handleFileSelect = async (file: FileNode) => {
     if (file.type === 'folder') return;
+
     const existing = openFiles.find(f => f.path === file.path);
     if (existing) {
       setActiveFileId(existing.id);
+      setSelectedPath(file.path);
+      return;
+    }
+
+    let content = '';
+
+    if (isNativeMode.current) {
+      const handle = nativeFileHandles.get(file.path);
+      if (handle) {
+        try {
+          const fileObj = await handle.getFile();
+          content = await fileObj.text();
+        } catch (err) {
+          content = '// Could not read file via File System Access API';
+          console.error('Native file read error:', err);
+        }
+      } else {
+        content = '// File handle not found — re-select the workspace';
+      }
     } else {
       try {
         const res = await fetch(`${BACKEND_URL}/api/file?path=${encodeURIComponent(file.path)}`);
         const data = await res.json();
-        const newFile: OpenFile = {
-          id: Date.now().toString(),
-          name: file.name,
-          path: file.path,
-          content: data.content || '',
-          language: file.language || 'python',
-          isModified: false,
-        };
-        setOpenFiles([...openFiles, newFile]);
-        setActiveFileId(newFile.id);
+        content = data.content || '';
       } catch (err) {
-        console.error('Failed to load file:', err);
+        console.error('Failed to fetch file from backend:', err);
       }
     }
+
+    const newFile: OpenFile = {
+      id: Date.now().toString(),
+      name: file.name,
+      path: file.path,
+      content,
+      language: file.language || detectLanguage(file.name),
+      isModified: false,
+    };
+    setOpenFiles(prev => [...prev, newFile]);
+    setActiveFileId(newFile.id);
     setSelectedPath(file.path);
   };
 
+  // ─── File Saving ─────────────────────────────────────────────────────────
   const handleFileSave = async (file: OpenFile) => {
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/file`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: file.path, content: file.content }),
-      });
-      if (res.ok) {
-        setOpenFiles(prev => prev.map(f =>
-          f.id === file.id ? { ...f, isModified: false } : f
-        ));
+    if (isNativeMode.current) {
+      const handle = nativeFileHandles.get(file.path);
+      if (handle) {
+        try {
+          const writable = await (handle as any).createWritable();
+          await writable.write(file.content);
+          await writable.close();
+          setOpenFiles(prev => prev.map(f =>
+            f.id === file.id ? { ...f, isModified: false } : f
+          ));
+        } catch (err) {
+          console.error('Failed to write native file:', err);
+        }
       }
-    } catch (err) {
-      console.error('Failed to save file:', err);
+    } else {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/file`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: file.path, content: file.content }),
+        });
+        if (res.ok) {
+          setOpenFiles(prev => prev.map(f =>
+            f.id === file.id ? { ...f, isModified: false } : f
+          ));
+        }
+      } catch (err) {
+        console.error('Failed to save file:', err);
+      }
     }
   };
 
@@ -112,7 +167,7 @@ export default function TestingPage() {
     return () => clearTimeout(t);
   }, [activeFileId, openFiles]);
 
-  // Keyboard shortcut
+  // Cmd/Ctrl+S
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
@@ -125,8 +180,9 @@ export default function TestingPage() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [activeFileId, openFiles]);
 
-  // Load files
+  // ─── File Tree (backend mode) ────────────────────────────────────────────
   const loadFiles = async (path: string = '.') => {
+    if (isNativeMode.current) return;
     try {
       const res = await fetch(`${BACKEND_URL}/api/files?path=${encodeURIComponent(path)}`);
       if (res.ok) {
@@ -138,28 +194,66 @@ export default function TestingPage() {
     }
   };
 
+  // ─── Workspace Switching ─────────────────────────────────────────────────
   const handleChangeWorkspace = async () => {
+    if (!IS_LOCAL) return;
     try {
-      const selectRes = await fetch(`${BACKEND_URL}/api/select-workspace-folder`, { method: 'POST' });
-      const selectData = await selectRes.json();
-      const path = selectData.path;
-      if (!path) return;
+      const res = await fetch(`${BACKEND_URL}/api/select-workspace-folder`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.path) return;
+      isNativeMode.current = false;
+      nativeFileHandles.clear();
       setOpenFiles([]);
       setActiveFileId(null);
       setSelectedPath(null);
-      loadFiles(path);
+      loadFiles(data.path);
     } catch (err) {
       console.error('Failed to change workspace:', err);
     }
   };
 
+  const handleNativeWorkspacePick = async (dirHandle: FileSystemDirectoryHandle) => {
+    nativeFileHandles.clear();
+    isNativeMode.current = true;
+
+    const readDir = async (
+      handle: FileSystemDirectoryHandle,
+      parentPath: string
+    ): Promise<FileNode[]> => {
+      const items: FileNode[] = [];
+      for await (const [name, entry] of (handle as any).entries()) {
+        if (name.startsWith('.') || name === 'node_modules' || name === '__pycache__') continue;
+        const path = `${parentPath}/${name}`;
+        if (entry.kind === 'directory') {
+          const children = await readDir(entry as FileSystemDirectoryHandle, path);
+          items.push({ id: path, name, path, type: 'folder', children });
+        } else {
+          const lang = detectLanguage(name);
+          nativeFileHandles.set(path, entry as FileSystemFileHandle);
+          items.push({ id: path, name, path, type: 'file', language: lang });
+        }
+      }
+      return items.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+    };
+
+    const tree = await readDir(dirHandle, dirHandle.name);
+    setFiles(tree);
+    setOpenFiles([]);
+    setActiveFileId(null);
+    setSelectedPath(null);
+  };
+
   useEffect(() => { loadFiles(); }, []);
 
+  // ─── Tab Management ───────────────────────────────────────────────────────
   const handleFileClose = (fileId: string) => {
-    const newFiles = openFiles.filter(f => f.id !== fileId);
-    setOpenFiles(newFiles);
+    const remaining = openFiles.filter(f => f.id !== fileId);
+    setOpenFiles(remaining);
     if (activeFileId === fileId) {
-      setActiveFileId(newFiles.length > 0 ? newFiles[newFiles.length - 1].id : null);
+      setActiveFileId(remaining.length > 0 ? remaining[remaining.length - 1].id : null);
     }
   };
 
@@ -171,48 +265,36 @@ export default function TestingPage() {
     setActiveFileId(null);
   };
 
-  // --- Get active file code ---
-  const getActiveCode = () => {
-    const activeFile = openFiles.find(f => f.id === activeFileId);
-    return activeFile?.content || '';
+  // ─── Get Code / Selection ─────────────────────────────────────────────────
+  const getActiveCode = () => openFiles.find(f => f.id === activeFileId)?.content || '';
+
+  /** Reads drag-selection from the <textarea> via selectionStart/selectionEnd */
+  const getSelectedText = (): string => {
+    const ta = editorTextareaRef.current;
+    if (!ta) return '';
+    const { selectionStart, selectionEnd, value } = ta;
+    if (selectionStart === selectionEnd) return '';
+    return value.slice(selectionStart, selectionEnd);
   };
 
-  const getSelectedText = () => {
-    const selection = window.getSelection();
-    return selection?.toString() || '';
-  };
-
-  // --- AI Action Handlers ---
+  // ─── AI Actions ───────────────────────────────────────────────────────────
   const handleAction = async (actionId: string) => {
     setSelectedAction(actionId);
     const code = getActiveCode();
-    if (!code && actionId !== 'redesign') {
-      setAiOutput('⚠️ No file is open. Please select a file first.');
+
+    if (!code) {
+      setAiOutput('⚠️ No file is open. Please select a file from the workspace first.');
       return;
     }
 
-    // For simulate and redesign without user input, show prompt first time
-    if (actionId === 'simulate' && !userInput.trim()) {
-      setAiLoading(true);
-      setAiOutput('');
-      try {
-        const res = await fetch(`${TESTING_API_BASE}/api/ai/simulate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code, language: 'python' }),
-        });
-        const data = await res.json();
-        setAiOutput(data.result);
-      } catch (err: any) {
-        setAiOutput(`❌ Connection error: ${err.message}\n\nMake sure the Testing backend is running on port 8001.`);
-      } finally {
-        setAiLoading(false);
-      }
-      return;
-    }
-
+    // For redesign: prompt the user for requirements if none given yet
     if (actionId === 'redesign' && !userInput.trim()) {
-      setAiOutput(`🎨 Re-Design Mode\n\nDescribe how you want the code to be restructured:\n\nExamples:\n• "Convert to object-oriented design"\n• "Split into separate functions"\n• "Add error handling and validation"\n• "Make async/concurrent"\n\nType your requirements below and click Send.`);
+      setAiOutput(
+        '🎨 Re-Design Mode\n\nDescribe how you want the code to be restructured:\n\n' +
+        'Examples:\n• "Convert to object-oriented design"\n• "Split into separate functions"\n' +
+        '• "Add error handling and validation"\n• "Make async/concurrent"\n\n' +
+        'Type your requirements below and click Send.'
+      );
       return;
     }
 
@@ -220,15 +302,15 @@ export default function TestingPage() {
     setAiOutput('');
 
     try {
+      // Selected text has priority over full file
       const selectedText = getSelectedText();
-      const body: any = {
+      const body = {
         code,
-        language: 'python',
+        language: detectLanguage(openFiles.find(f => f.id === activeFileId)?.name || ''),
         selected_text: selectedText || undefined,
         user_input: userInput || undefined,
       };
 
-      // Map action IDs to API endpoints
       const endpointMap: Record<string, string> = {
         'quick-test': '/api/ai/quick-test',
         'generate-tests': '/api/ai/generate-tests',
@@ -245,18 +327,27 @@ export default function TestingPage() {
         return;
       }
 
-      const res = await fetch(`${TESTING_API_BASE}${endpoint}`, {
+      // Show scope hint in UI
+      if (selectedText) {
+        setAiOutput(`🔍 Analysing selected snippet (${selectedText.split('\n').length} lines)...\n`);
+      }
+
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
 
-      const data = await res.json();
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        setAiOutput(`❌ Server error ${res.status}: ${err.detail || res.statusText}`);
+        return;
+      }
 
-      // Display main result
+      const data = await res.json();
       let output = data.result || 'No response from AI.';
 
-      // Append test results if available
+      // Append execution test results if available
       if (data.test_results && data.test_results.length > 0) {
         const passed = data.test_results.filter((r: any) => r.passed).length;
         const total = data.test_results.length;
@@ -271,21 +362,18 @@ export default function TestingPage() {
 
       setAiOutput(output);
 
-      // Update metrics if returned
       if (data.metrics) {
         setMetrics(m => ({
           efficiency: data.metrics.efficiency ?? m.efficiency,
           scalability: data.metrics.scalability ?? m.scalability,
         }));
       }
-
     } catch (err: any) {
-      setAiOutput(`❌ Connection error: ${err.message}\n\nMake sure the Testing backend is running on port 8001.`);
+      setAiOutput(`❌ Network error: ${err.message}\n\nMake sure the backend is running on port 8000.`);
     } finally {
       setAiLoading(false);
     }
   };
-
 
   // Scroll AI output to bottom
   useEffect(() => {
@@ -294,10 +382,11 @@ export default function TestingPage() {
     }
   }, [aiOutput]);
 
+  // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div className="h-full flex flex-col bg-background">
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Panel - File Explorer */}
+        {/* Left Panel — File Explorer */}
         <div
           className={cn(
             'relative bg-card border-r border-border transition-all duration-300 overflow-hidden flex flex-col',
@@ -308,14 +397,16 @@ export default function TestingPage() {
             onFileSelect={handleFileSelect}
             selectedPath={selectedPath}
             files={files}
-            onRefresh={loadFiles}
+            onRefresh={() => { if (!isNativeMode.current) loadFiles(); }}
             onFileUpload={async (file) => {
+              if (isNativeMode.current) return;
               const formData = new FormData();
               formData.append('file', file);
               await fetch(`${BACKEND_URL}/api/upload`, { method: 'POST', body: formData });
               loadFiles();
             }}
-            onWorkspaceChange={handleChangeWorkspace}
+            onWorkspaceChange={IS_LOCAL ? handleChangeWorkspace : undefined}
+            onNativeWorkspacePick={handleNativeWorkspacePick}
           />
         </div>
 
@@ -324,13 +415,15 @@ export default function TestingPage() {
           onClick={() => setLeftPanelOpen(!leftPanelOpen)}
           className="w-5 flex items-center justify-center bg-secondary/30 border-r border-border hover:bg-secondary/50 transition-colors"
         >
-          {leftPanelOpen ? <ChevronLeft className="h-4 w-4 text-muted-foreground" /> : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+          {leftPanelOpen
+            ? <ChevronLeft className="h-4 w-4 text-muted-foreground" />
+            : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
         </button>
 
-        {/* Center - Code Editor & AI Output */}
+        {/* Center — Code Editor + AI Output/Terminal */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Open Files Header */}
-          <div className="h-8 bg-secondary/20 border-b border-border flex items-center justify-between px-2">
+          {/* Open Files Tabs Header */}
+          <div className="h-8 bg-secondary/20 border-b border-border flex items-center justify-between px-2 shrink-0">
             <div className="flex items-center gap-2">
               <span className="text-xs text-muted-foreground">Open Files</span>
               {openFiles.length > 0 && (
@@ -345,24 +438,31 @@ export default function TestingPage() {
                   Close All
                 </Button>
               )}
+              {isNativeMode.current && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-medium">
+                  NATIVE FS
+                </span>
+              )}
             </div>
-            {activeFileId && openFiles.find(f => f.id === activeFileId)?.isModified && (
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-primary animate-pulse">Syncing...</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 text-[10px] gap-1 px-2 hover:bg-primary/20"
-                  onClick={() => {
-                    const activeFile = openFiles.find(f => f.id === activeFileId);
-                    if (activeFile) handleFileSave(activeFile);
-                  }}
-                >
-                  <Save className="h-3 w-3" />
-                  Save Now
-                </Button>
-              </div>
-            )}
+            <div className="flex items-center gap-2">
+              {activeFileId && openFiles.find(f => f.id === activeFileId)?.isModified && (
+                <>
+                  <span className="text-[10px] text-primary animate-pulse">Syncing...</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 text-[10px] gap-1 px-2 hover:bg-primary/20"
+                    onClick={() => {
+                      const af = openFiles.find(f => f.id === activeFileId);
+                      if (af) handleFileSave(af);
+                    }}
+                  >
+                    <Save className="h-3 w-3" />
+                    Save Now
+                  </Button>
+                </>
+              )}
+            </div>
           </div>
 
           {/* Code Editor */}
@@ -372,6 +472,7 @@ export default function TestingPage() {
               activeFileId={activeFileId}
               onFileClose={handleFileClose}
               onFileSelect={setActiveFileId}
+              textareaRef={editorTextareaRef}
               onContentChange={(fileId, newContent) => {
                 setOpenFiles(prev => prev.map(f =>
                   f.id === fileId ? { ...f, content: newContent, isModified: true } : f
@@ -380,7 +481,7 @@ export default function TestingPage() {
             />
           </div>
 
-          {/* Tabbed Panel: AI Output & Terminal */}
+          {/* Tabbed Panel: AI Output + Terminal */}
           <div
             className={cn(
               'border-t border-border transition-all duration-300 flex flex-col',
@@ -388,13 +489,13 @@ export default function TestingPage() {
             )}
           >
             {/* Tab Header */}
-            <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/5 bg-white/5">
+            <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/5 bg-white/5 shrink-0">
               <div className="flex items-center gap-4">
                 <button
                   onClick={() => setActiveTab('output')}
                   className={cn(
-                    "flex items-center gap-2 text-[11px] font-medium transition-colors hover:text-primary",
-                    activeTab === 'output' ? "text-primary border-b border-primary pb-0.5" : "text-slate-500"
+                    'flex items-center gap-2 text-[11px] font-medium transition-colors hover:text-primary',
+                    activeTab === 'output' ? 'text-primary border-b border-primary pb-0.5' : 'text-slate-500'
                   )}
                 >
                   <Bot className="h-3.5 w-3.5" />
@@ -403,8 +504,8 @@ export default function TestingPage() {
                 <button
                   onClick={() => setActiveTab('terminal')}
                   className={cn(
-                    "flex items-center gap-2 text-[11px] font-medium transition-colors hover:text-primary",
-                    activeTab === 'terminal' ? "text-primary border-b border-primary pb-0.5" : "text-slate-500"
+                    'flex items-center gap-2 text-[11px] font-medium transition-colors hover:text-primary',
+                    activeTab === 'terminal' ? 'text-primary border-b border-primary pb-0.5' : 'text-slate-500'
                   )}
                 >
                   <TerminalIcon className="h-3.5 w-3.5" />
@@ -419,7 +520,9 @@ export default function TestingPage() {
                   onClick={() => setTerminalExpanded(!terminalExpanded)}
                   title={terminalExpanded ? 'Collapse' : 'Expand'}
                 >
-                  {terminalExpanded ? <Minimize2 className="h-3 w-3 text-slate-400" /> : <Maximize2 className="h-3 w-3 text-slate-400" />}
+                  {terminalExpanded
+                    ? <Minimize2 className="h-3 w-3 text-slate-400" />
+                    : <Maximize2 className="h-3 w-3 text-slate-400" />}
                 </Button>
                 {activeTab === 'output' && (
                   <Button
@@ -437,13 +540,13 @@ export default function TestingPage() {
 
             {/* Content Area */}
             <div className="flex-1 overflow-hidden relative">
-              {/* AI Output Content */}
-              <div className={cn("h-full flex flex-col bg-[#0b0c10] font-mono", activeTab !== 'output' && "hidden")}>
+              {/* AI Output */}
+              <div className={cn('h-full flex flex-col bg-[#0b0c10] font-mono', activeTab !== 'output' && 'hidden')}>
                 <div ref={outputRef} className="flex-1 overflow-auto p-4 selection:bg-primary/30 text-slate-300">
                   {aiLoading ? (
                     <div className="flex items-center gap-2 text-primary text-[12px]">
                       <Loader2 className="h-4 w-4 animate-spin" />
-                      <span>Analyzing code...</span>
+                      <span>Analysing code...</span>
                     </div>
                   ) : aiOutput ? (
                     <div className="whitespace-pre-wrap break-words text-[12px] leading-relaxed">
@@ -451,22 +554,30 @@ export default function TestingPage() {
                     </div>
                   ) : (
                     <div className="text-slate-600 italic text-[11px]">
-                      Select an AI action from the right panel.
+                      Select an AI action from the right panel.{'\n'}
+                      <span className="text-slate-700 not-italic block mt-1">
+                        💡 Drag to select specific code before clicking an action to analyse just that snippet.
+                      </span>
                     </div>
                   )}
                 </div>
-                {/* Input area for AI actions */}
+                {/* Input area for simulate / redesign */}
                 {(selectedAction === 'simulate' || selectedAction === 'redesign') && (
-                  <div className="p-3 bg-white/5 border-t border-white/5 mt-auto">
+                  <div className="p-3 bg-white/5 border-t border-white/5">
                     <div className="flex items-start gap-2">
                       <textarea
                         rows={2}
                         value={userInput}
                         onChange={(e) => setUserInput(e.target.value)}
-                        placeholder={selectedAction === 'simulate' ? "Input values..." : "Restructure needs..."}
-                        className="flex-1 bg-transparent border border-white/10 rounded p-2 outline-none text-xs text-white placeholder:text-slate-600 resize-none min-h-[2.5rem]"
+                        placeholder={selectedAction === 'simulate' ? 'Input values…' : 'Restructure requirements…'}
+                        className="flex-1 bg-transparent border border-white/10 rounded p-2 outline-none text-xs text-white placeholder:text-slate-600 resize-none"
                       />
-                      <Button size="icon" className="h-8 w-8" onClick={() => handleAction(selectedAction)} disabled={aiLoading}>
+                      <Button
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => handleAction(selectedAction)}
+                        disabled={aiLoading}
+                      >
                         <Send className="h-3.5 w-3.5" />
                       </Button>
                     </div>
@@ -474,9 +585,12 @@ export default function TestingPage() {
                 )}
               </div>
 
-              {/* Terminal Content */}
-              <div className={cn("h-full", activeTab !== 'terminal' && "hidden")}>
-                <Terminal isExpanded={terminalExpanded} onExpand={() => setTerminalExpanded(!terminalExpanded)} />
+              {/* Terminal */}
+              <div className={cn('h-full', activeTab !== 'terminal' && 'hidden')}>
+                <Terminal
+                  isExpanded={terminalExpanded}
+                  onExpand={() => setTerminalExpanded(!terminalExpanded)}
+                />
               </div>
             </div>
           </div>
@@ -487,10 +601,12 @@ export default function TestingPage() {
           onClick={() => setRightPanelOpen(!rightPanelOpen)}
           className="w-5 flex items-center justify-center bg-secondary/30 border-l border-border hover:bg-secondary/50 transition-colors"
         >
-          {rightPanelOpen ? <ChevronRight className="h-4 w-4 text-muted-foreground" /> : <ChevronLeft className="h-4 w-4 text-muted-foreground" />}
+          {rightPanelOpen
+            ? <ChevronRight className="h-4 w-4 text-muted-foreground" />
+            : <ChevronLeft className="h-4 w-4 text-muted-foreground" />}
         </button>
 
-        {/* Right Panel - AI Commands + Metrics */}
+        {/* Right Panel — AI Testing Agent */}
         <div
           className={cn(
             'bg-card border-l border-border transition-all duration-300 overflow-hidden flex flex-col',
@@ -540,16 +656,23 @@ export default function TestingPage() {
                 );
               })}
             </div>
+
+            {/* Selection hint */}
+            <div className="mt-4 p-2.5 rounded-lg bg-primary/5 border border-primary/10">
+              <p className="text-[10px] text-muted-foreground leading-relaxed">
+                💡 <span className="text-primary font-medium">Tip:</span> Drag to select specific lines in the editor — the AI will analyse just your selection instead of the entire file.
+              </p>
+            </div>
           </div>
 
-          {/* Performance Metrics (at bottom of agent area) */}
+          {/* Performance Metrics */}
           <div className="p-3 border-t border-border space-y-3">
             <div className="flex items-center gap-2 mb-1">
               <TrendingUp className="h-3.5 w-3.5 text-primary" />
               <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Performance</span>
             </div>
 
-            {/* Efficiency Score */}
+            {/* Efficiency */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
@@ -558,7 +681,9 @@ export default function TestingPage() {
                 </div>
                 <span className={cn(
                   'text-[11px] font-bold tabular-nums',
-                  metrics.efficiency >= 70 ? 'text-emerald-400' : metrics.efficiency >= 40 ? 'text-amber-400' : 'text-rose-400'
+                  metrics.efficiency >= 70 ? 'text-emerald-400'
+                    : metrics.efficiency >= 40 ? 'text-amber-400'
+                      : 'text-rose-400'
                 )}>
                   {metrics.efficiency}%
                 </span>
@@ -567,14 +692,16 @@ export default function TestingPage() {
                 <div
                   className={cn(
                     'h-full rounded-full transition-all duration-700 ease-out',
-                    metrics.efficiency >= 70 ? 'bg-emerald-500' : metrics.efficiency >= 40 ? 'bg-amber-500' : 'bg-rose-500'
+                    metrics.efficiency >= 70 ? 'bg-emerald-500'
+                      : metrics.efficiency >= 40 ? 'bg-amber-500'
+                        : 'bg-rose-500'
                   )}
                   style={{ width: `${metrics.efficiency}%` }}
                 />
               </div>
             </div>
 
-            {/* Scalability Score */}
+            {/* Scalability */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
@@ -583,7 +710,9 @@ export default function TestingPage() {
                 </div>
                 <span className={cn(
                   'text-[11px] font-bold tabular-nums',
-                  metrics.scalability >= 70 ? 'text-blue-400' : metrics.scalability >= 40 ? 'text-amber-400' : 'text-rose-400'
+                  metrics.scalability >= 70 ? 'text-blue-400'
+                    : metrics.scalability >= 40 ? 'text-amber-400'
+                      : 'text-rose-400'
                 )}>
                   {metrics.scalability}%
                 </span>
@@ -592,7 +721,9 @@ export default function TestingPage() {
                 <div
                   className={cn(
                     'h-full rounded-full transition-all duration-700 ease-out',
-                    metrics.scalability >= 70 ? 'bg-blue-500' : metrics.scalability >= 40 ? 'bg-amber-500' : 'bg-rose-500'
+                    metrics.scalability >= 70 ? 'bg-blue-500'
+                      : metrics.scalability >= 40 ? 'bg-amber-500'
+                        : 'bg-rose-500'
                   )}
                   style={{ width: `${metrics.scalability}%` }}
                 />

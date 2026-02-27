@@ -11,12 +11,6 @@ export default defineConfig(({ mode }) => ({
       overlay: false,
     },
     proxy: {
-      '/testing-api': {
-        target: 'http://localhost:8001',
-        changeOrigin: true,
-        secure: false,
-        rewrite: (path) => path.replace(/^\/testing-api/, ''),
-      },
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,

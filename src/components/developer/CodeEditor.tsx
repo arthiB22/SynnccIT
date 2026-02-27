@@ -1,3 +1,4 @@
+import { useRef, useEffect } from 'react';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { OpenFile } from '@/types/api';
@@ -8,10 +9,23 @@ interface CodeEditorProps {
   onFileClose: (fileId: string) => void;
   onFileSelect: (fileId: string) => void;
   onContentChange: (fileId: string, newContent: string) => void;
+  /** Ref that's kept pointing at the active textarea so callers can read
+   *  selectionStart / selectionEnd for drag-selection features. */
+  textareaRef?: React.RefObject<HTMLTextAreaElement>;
 }
 
-export function CodeEditor({ openFiles, activeFileId, onFileClose, onFileSelect, onContentChange }: CodeEditorProps) {
+export function CodeEditor({
+  openFiles,
+  activeFileId,
+  onFileClose,
+  onFileSelect,
+  onContentChange,
+  textareaRef,
+}: CodeEditorProps) {
   const activeFile = openFiles.find(f => f.id === activeFileId);
+  // Internal ref for when the parent doesn't provide one
+  const internalRef = useRef<HTMLTextAreaElement>(null);
+  const ref = textareaRef ?? internalRef;
 
   return (
     <div className="h-full flex flex-col bg-editor-bg">
@@ -42,40 +56,19 @@ export function CodeEditor({ openFiles, activeFileId, onFileClose, onFileSelect,
       <div className="flex-1 overflow-hidden relative font-mono text-sm">
         {activeFile ? (
           <textarea
+            ref={ref}
             className="w-full h-full p-4 bg-editor-bg text-foreground/90 resize-none outline-none font-mono text-sm leading-relaxed"
             value={activeFile.content}
             onChange={(e) => onContentChange(activeFile.id, e.target.value)}
             spellCheck={false}
           />
         ) : (
-          <div className="h-full flex items-center justify-center text-muted-foreground">
-            <p>Select a file to view its content</p>
+          <div className="h-full flex flex-col items-center justify-center gap-2 text-muted-foreground">
+            <p className="text-sm">Select a file from the workspace to view its content</p>
+            <p className="text-xs opacity-50">Use the folder icon ↖ to pick a workspace folder</p>
           </div>
         )}
       </div>
     </div>
   );
-}
-
-// Simple syntax highlighting
-function highlightSyntax(line: string): React.ReactNode {
-  const keywords = ['import', 'export', 'const', 'let', 'var', 'function', 'return', 'if', 'else', 'async', 'await', 'from', 'interface', 'type'];
-
-  let result = line;
-
-  // Highlight strings
-  result = result.replace(/(["'`])([^"'`]*)\1/g, '<span class="text-syntax-string">$&</span>');
-
-  // Highlight keywords
-  keywords.forEach(kw => {
-    const regex = new RegExp(`\\b${kw}\\b`, 'g');
-    result = result.replace(regex, `<span class="text-syntax-keyword">${kw}</span>`);
-  });
-
-  // Highlight comments
-  if (line.trim().startsWith('//')) {
-    result = `<span class="text-syntax-comment">${line}</span>`;
-  }
-
-  return <span dangerouslySetInnerHTML={{ __html: result }} />;
 }
