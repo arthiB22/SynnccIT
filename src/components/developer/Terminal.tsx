@@ -43,11 +43,11 @@ function CloudTerminal({ isExpanded }: { isExpanded?: boolean }) {
 
   const runCommand = useCallback(async (cmd: string) => {
     if (!cmd.trim()) return;
-    setLines(prev => [...prev, { text: `$ ${cmd}`, type: 'cmd' }]);
+    setLines(prev => [...prev, { text: `${cwd} $ ${cmd}`, type: 'cmd' }]);
     setInput('');
     setLoading(true);
 
-    // Handle built-ins locally
+    // Handle `clear` locally
     if (cmd.trim() === 'clear') {
       setLines([]);
       setLoading(false);
@@ -61,29 +61,44 @@ function CloudTerminal({ isExpanded }: { isExpanded?: boolean }) {
         body: JSON.stringify({ command: cmd, cwd }),
       });
 
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        setLines(prev => [...prev, { text: errData.error || `HTTP ${res.status}`, type: 'err' }]);
+        setLoading(false);
+        return;
+      }
+
       const data = await res.json();
       const newLines: typeof lines = [];
 
       if (data.output) {
-        data.output.split('\n').forEach((l: string) => {
+        data.output.replace(/\r\n/g, '\n').split('\n').forEach((l: string) => {
           newLines.push({ text: l, type: 'out' });
         });
       }
       if (data.error) {
-        data.error.split('\n').forEach((l: string) => {
-          if (l) newLines.push({ text: l, type: 'err' });
+        data.error.replace(/\r\n/g, '\n').split('\n').forEach((l: string) => {
+          if (l.trim()) newLines.push({ text: l, type: 'err' });
         });
       }
       if (!data.output && !data.error) {
-        newLines.push({ text: '(no output)', type: 'info' });
+        // Silent success (e.g. cd, export, etc.)
+      }
+
+      // Update cwd if server resolved a cd
+      if (data.newCwd && data.newCwd !== cwd) {
+        setCwd(data.newCwd);
       }
 
       setLines(prev => [...prev, ...newLines]);
     } catch (err: any) {
-      setLines(prev => [...prev, { text: `❌ ${err.message}`, type: 'err' }]);
+      setLines(prev => [
+        ...prev,
+        { text: `❌ ${err.message} — make sure the deployment is up to date.`, type: 'err' },
+      ]);
     } finally {
       setLoading(false);
-      inputRef.current?.focus();
+      setTimeout(() => inputRef.current?.focus(), 50);
     }
   }, [cwd]);
 
@@ -191,14 +206,14 @@ function LocalTerminal({ isExpanded, onExpand }: { isExpanded?: boolean; onExpan
       term.write('\r\n\x1b[33m[ERROR] Could not connect. Is the backend running on port 8000?\x1b[0m\r\n');
     };
 
-    term.onData = (data) => {
+    term.onData((data: string) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data }));
-    };
+    });
 
-    term.onResize = (size) => {
+    term.onResize((size: { cols: number; rows: number }) => {
       if (ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }));
-    };
+    });
 
     const handleResize = () => fitAddon.fit();
     window.addEventListener('resize', handleResize);
