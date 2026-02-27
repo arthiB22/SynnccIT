@@ -14,7 +14,12 @@ import {
   Plus,
   FolderSync,
   FolderSearch,
+  Terminal,
 } from 'lucide-react';
+
+const BACKEND_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? ''
+  : 'http://localhost:8000';
 import { cn } from '@/lib/utils';
 import { FileNode } from '@/types/api';
 import { Button } from '@/components/ui/button';
@@ -82,7 +87,7 @@ function FileTreeItem({ node, depth, selectedPath, onSelect }: FileTreeItemProps
         <button
           onClick={(e) => {
             e.stopPropagation();
-            fetch('/api/open-folder', {
+            fetch(`${BACKEND_URL}/api/open-folder`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ path: node.path }),
@@ -148,7 +153,7 @@ export function FileExplorer({
     if (!filename) return null;
 
     try {
-      const res = await fetch('/api/file', {
+      const res = await fetch(`${BACKEND_URL}/api/file`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: filename, content: '' }),
@@ -204,7 +209,18 @@ export function FileExplorer({
             size="icon"
             className="h-7 w-7"
             onClick={() => {
-              fetch('/api/open-folder', {
+              fetch(`${BACKEND_URL}/api/open-terminal`, { method: 'POST' });
+            }}
+            title="Open Native Terminal from Finder"
+          >
+            <Terminal className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={() => {
+              fetch(`${BACKEND_URL}/api/open-folder`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: '.' }),

@@ -353,30 +353,6 @@ def run_terminal(req: TerminalRequest):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.post("/api/open-folder")
-def open_folder(req: Dict[str, str]):
-    path = req.get("path")
-    if not path:
-        path = CURRENT_DIR
-    elif not os.path.isabs(path):
-        path = os.path.join(CURRENT_DIR, path)
-        
-    if not os.path.exists(path):
-        return JSONResponse(status_code=404, content={"error": "Path not found"})
-    
-    try:
-        import platform
-        system = platform.system()
-        if system == "Darwin":  # macOS
-            subprocess.run(["open", path])
-        elif system == "Windows":
-            os.startfile(path)
-        else:  # Linux
-            subprocess.run(["xdg-open", path])
-        return {"success": True}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), path: Optional[str] = Form(None)):
     global CURRENT_DIR
@@ -404,11 +380,18 @@ def select_workspace_folder():
         system = platform.system()
         path = None
         
+        logger.info(f"Triggering folder selection for system: {system}")
+        
         if system == "Darwin":  # macOS
             cmd = 'osascript -e "POSIX path of (choose folder with prompt \\"Select Workspace Folder\\")"'
-            result = subprocess.check_output(cmd, shell=True, text=True).strip()
-            if result:
-                path = result
+            try:
+                result = subprocess.check_output(cmd, shell=True, text=True).strip()
+                if result:
+                    path = result
+            except subprocess.CalledProcessError:
+                logger.warning("User cancelled the folder selection dialog.")
+                return {"error": "Folder selection cancelled"}
+                
         elif system == "Windows":
             # Use PowerShell to open a folder picker
             ps_script = """
@@ -417,9 +400,13 @@ def select_workspace_folder():
             $f.Description = 'Select Workspace Folder';
             if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath }
             """
-            result = subprocess.check_output(["powershell", "-NoProfile", "-Command", ps_script], text=True).strip()
-            if result:
-                path = result
+            try:
+                result = subprocess.check_output(["powershell", "-NoProfile", "-Command", ps_script], text=True).strip()
+                if result:
+                    path = result
+            except Exception as e:
+                logger.error(f"PowerShell folder picker failed: {e}")
+                
         else:  # Linux (GTK/KDE)
             try:
                 # Try zenity (GTK)
@@ -446,7 +433,7 @@ def select_workspace_folder():
                 TERM_PROCESS = None
                 MASTER_FD = None
                 
-            return {"path": CURRENT_DIR}
+            return {"path": CURRENT_DIR, "success": True}
         
         return {"error": "Folder selection cancelled or failed"}
     except Exception as e:
@@ -468,6 +455,7 @@ def open_folder(req: Dict[str, str]):
     try:
         import platform
         system = platform.system()
+        logger.info(f"Opening folder: {path} on {system}")
         if system == "Darwin":  # macOS
             subprocess.run(["open", path])
         elif system == "Windows":
@@ -476,6 +464,7 @@ def open_folder(req: Dict[str, str]):
             subprocess.run(["xdg-open", path])
         return {"success": True}
     except Exception as e:
+        logger.error(f"Open folder error: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/api/open-terminal")
@@ -485,21 +474,32 @@ def open_terminal():
     try:
         import platform
         system = platform.system()
+        logger.info(f"Opening terminal in: {CURRENT_DIR} on {system}")
+        
         if system == "Darwin":  # macOS
-            subprocess.run(["open", "-a", "Terminal", CURRENT_DIR])
+            # Use AppleScript to open Terminal and CD to the directory, ensuring it works even if already open
+            script = f'tell application "Terminal" to do script "cd \'{CURRENT_DIR}\' && clear"'
+            subprocess.run(["osascript", "-e", script])
+            # Also bring Terminal to front
+            subprocess.run(["osascript", "-e", 'tell application "Terminal" to activate'])
         elif system == "Windows":
             subprocess.run(["start", "cmd", "/K", f"cd /d {CURRENT_DIR}"], shell=True)
         else:  # Linux
             # Try common terminals
-            terminals = ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"]
+            terminals = ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm", "termite", "alacritty"]
+            opened = False
             for term in terminals:
                 try:
-                    subprocess.run([term], cwd=CURRENT_DIR, start_new_session=True)
+                    subprocess.Popen([term], cwd=CURRENT_DIR, start_new_session=True)
+                    opened = True
                     break
                 except FileNotFoundError:
                     continue
+            if not opened:
+                return JSONResponse(status_code=500, content={"error": "No terminal emulator found"})
         return {"success": True}
     except Exception as e:
+        logger.error(f"Open terminal error: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/api/agent")

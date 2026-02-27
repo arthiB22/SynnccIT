@@ -12,6 +12,10 @@ interface TerminalProps {
   isExpanded?: boolean;
 }
 
+const BACKEND_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? ''
+  : 'http://localhost:8000';
+
 export function Terminal({ className, onExpand, isExpanded }: TerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
@@ -46,7 +50,10 @@ export function Terminal({ className, onExpand, isExpanded }: TerminalProps) {
 
     // Connect WebSocket
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const wsUrl = isLocal
+      ? `${protocol}//${window.location.host}/ws/terminal`
+      : 'ws://localhost:8000/ws/terminal';
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
@@ -103,7 +110,7 @@ export function Terminal({ className, onExpand, isExpanded }: TerminalProps) {
   };
 
   const openSystemTerminal = () => {
-    fetch('/api/open-terminal', { method: 'POST' });
+    fetch(`${BACKEND_URL}/api/open-terminal`, { method: 'POST' });
   };
 
   return (
@@ -131,10 +138,10 @@ export function Terminal({ className, onExpand, isExpanded }: TerminalProps) {
             onClick={openSystemTerminal}
             title="Open Native Terminal from Finder"
           >
-            <ExternalLink className="h-3 w-3 text-slate-400" />
+            <ExternalLink className="h-3.5 w-3.5 text-slate-400 hover:text-foreground" />
           </Button>
-          <Button variant="ghost" size="icon" className="h-6 w-6 hover:bg-white/10" onClick={clearTerminal}>
-            <Trash2 className="h-3 w-3 text-slate-400" />
+          <Button variant="ghost" size="icon" className="h-6 w-6 hover:bg-white/10" onClick={clearTerminal} title="Clear Terminal">
+            <Trash2 className="h-3.5 w-3.5 text-slate-400 hover:text-foreground" />
           </Button>
         </div>
       </div>

@@ -8,6 +8,10 @@ import { Terminal } from '@/components/developer/Terminal';
 import { AgentSidePanel } from '@/components/developer/AgentSidePanel';
 import { FileNode, OpenFile } from '@/types/api';
 
+const BACKEND_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? ''
+  : 'http://localhost:8000';
+
 export default function DeveloperPage() {
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
@@ -26,7 +30,7 @@ export default function DeveloperPage() {
       setActiveFileId(existing.id);
     } else {
       // Fetch file content from backend API
-      const res = await fetch(`/api/file?path=${encodeURIComponent(file.path)}`);
+      const res = await fetch(`${BACKEND_URL}/api/file?path=${encodeURIComponent(file.path)}`);
       const data = await res.json();
       const newFile: OpenFile = {
         id: Date.now().toString(),
@@ -45,7 +49,7 @@ export default function DeveloperPage() {
   // Save file to backend
   const handleFileSave = async (file: OpenFile) => {
     try {
-      const res = await fetch('/api/file', {
+      const res = await fetch(`${BACKEND_URL}/api/file`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: file.path, content: file.content }),
@@ -91,7 +95,7 @@ export default function DeveloperPage() {
   // Fetch file tree
   const loadFiles = async (path: string = '.') => {
     try {
-      const res = await fetch(`/api/files?path=${encodeURIComponent(path)}`);
+      const res = await fetch(`${BACKEND_URL}/api/files?path=${encodeURIComponent(path)}`);
       if (res.ok) {
         const data = await res.json();
         setFiles(data.children ? data.children : [data]);
@@ -104,7 +108,9 @@ export default function DeveloperPage() {
   // Real-time File System Sync
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/fs`;
+    const wsUrl = BACKEND_URL
+      ? BACKEND_URL.replace('http', 'ws') + '/ws/fs'
+      : `${protocol}//${window.location.host}/ws/fs`;
     const ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {
@@ -121,7 +127,7 @@ export default function DeveloperPage() {
   // Handle workspace change
   const handleChangeWorkspace = async () => {
     try {
-      const selectRes = await fetch('/api/select-workspace-folder', { method: 'POST' });
+      const selectRes = await fetch(`${BACKEND_URL}/api/select-workspace-folder`, { method: 'POST' });
       const selectData = await selectRes.json();
 
       const path = selectData.path;
@@ -175,7 +181,7 @@ export default function DeveloperPage() {
             onFileUpload={async (file) => {
               const formData = new FormData();
               formData.append('file', file);
-              await fetch('/api/upload', { method: 'POST', body: formData });
+              await fetch(`${BACKEND_URL}/api/upload`, { method: 'POST', body: formData });
               loadFiles();
             }}
             onWorkspaceChange={handleChangeWorkspace}

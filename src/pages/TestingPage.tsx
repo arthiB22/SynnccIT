@@ -17,14 +17,21 @@ import {
   Gauge,
   TrendingUp,
   Send,
+  Terminal as TerminalIcon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { FileExplorer } from '@/components/developer/FileExplorer';
 import { CodeEditor } from '@/components/developer/CodeEditor';
+import { Terminal } from '@/components/developer/Terminal';
 import { FileNode, OpenFile } from '@/types/api';
 
-const TESTING_API = '/testing-api';
+const TESTING_API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? '/testing-api'
+  : 'http://localhost:8001';
+const BACKEND_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? ''
+  : 'http://localhost:8000';
 
 const actionButtons = [
   { id: 'quick-test', label: 'Run Quick Tests', icon: Play, description: 'AI reviews code and gives crisp feedback' },
@@ -38,7 +45,8 @@ const actionButtons = [
 export default function TestingPage() {
   const [leftPanelOpen, setLeftPanelOpen] = useState(true);
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
-  const [outputExpanded, setOutputExpanded] = useState(false);
+  const [terminalExpanded, setTerminalExpanded] = useState(false);
+  const [activeTab, setActiveTab] = useState<'output' | 'terminal'>('output');
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [files, setFiles] = useState<FileNode[]>([]);
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
@@ -60,7 +68,7 @@ export default function TestingPage() {
       setActiveFileId(existing.id);
     } else {
       try {
-        const res = await fetch(`/api/file?path=${encodeURIComponent(file.path)}`);
+        const res = await fetch(`${BACKEND_URL}/api/file?path=${encodeURIComponent(file.path)}`);
         const data = await res.json();
         const newFile: OpenFile = {
           id: Date.now().toString(),
@@ -81,7 +89,7 @@ export default function TestingPage() {
 
   const handleFileSave = async (file: OpenFile) => {
     try {
-      const res = await fetch('/api/file', {
+      const res = await fetch(`${BACKEND_URL}/api/file`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: file.path, content: file.content }),
@@ -120,7 +128,7 @@ export default function TestingPage() {
   // Load files
   const loadFiles = async (path: string = '.') => {
     try {
-      const res = await fetch(`/api/files?path=${encodeURIComponent(path)}`);
+      const res = await fetch(`${BACKEND_URL}/api/files?path=${encodeURIComponent(path)}`);
       if (res.ok) {
         const data = await res.json();
         setFiles(data.children ? data.children : [data]);
@@ -132,7 +140,7 @@ export default function TestingPage() {
 
   const handleChangeWorkspace = async () => {
     try {
-      const selectRes = await fetch('/api/select-workspace-folder', { method: 'POST' });
+      const selectRes = await fetch(`${BACKEND_URL}/api/select-workspace-folder`, { method: 'POST' });
       const selectData = await selectRes.json();
       const path = selectData.path;
       if (!path) return;
@@ -188,7 +196,7 @@ export default function TestingPage() {
       setAiLoading(true);
       setAiOutput('');
       try {
-        const res = await fetch(`${TESTING_API}/api/ai/simulate`, {
+        const res = await fetch(`${TESTING_API_BASE}/api/ai/simulate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ code, language: 'python' }),
@@ -237,7 +245,7 @@ export default function TestingPage() {
         return;
       }
 
-      const res = await fetch(`${TESTING_API}${endpoint}`, {
+      const res = await fetch(`${TESTING_API_BASE}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -304,7 +312,7 @@ export default function TestingPage() {
             onFileUpload={async (file) => {
               const formData = new FormData();
               formData.append('file', file);
-              await fetch('/api/upload', { method: 'POST', body: formData });
+              await fetch(`${BACKEND_URL}/api/upload`, { method: 'POST', body: formData });
               loadFiles();
             }}
             onWorkspaceChange={handleChangeWorkspace}
@@ -358,7 +366,7 @@ export default function TestingPage() {
           </div>
 
           {/* Code Editor */}
-          <div className={cn('flex-1 overflow-hidden', outputExpanded && 'hidden')}>
+          <div className={cn('flex-1 overflow-hidden', terminalExpanded && 'hidden')}>
             <CodeEditor
               openFiles={openFiles}
               activeFileId={activeFileId}
@@ -372,95 +380,104 @@ export default function TestingPage() {
             />
           </div>
 
-          {/* AI Output Panel (replacing Terminal) */}
+          {/* Tabbed Panel: AI Output & Terminal */}
           <div
             className={cn(
-              'border-t border-border transition-all duration-300',
-              outputExpanded ? 'flex-1' : 'h-48'
+              'border-t border-border transition-all duration-300 flex flex-col',
+              terminalExpanded ? 'flex-1' : 'h-64'
             )}
           >
-            <div className="h-full flex flex-col bg-[#0b0c10] font-mono text-slate-300">
-              {/* Output Header */}
-              <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/5 bg-white/5">
-                <div className="flex items-center gap-2">
-                  <Bot className="h-3.5 w-3.5 text-primary" />
-                  <span className="text-[11px] font-medium text-slate-400 uppercase tracking-tighter">
-                    AI Output {selectedAction && `— ${actionButtons.find(a => a.id === selectedAction)?.label}`}
-                  </span>
-                  {aiLoading && <Loader2 className="h-3 w-3 text-primary animate-spin" />}
-                </div>
-                <div className="flex items-center gap-0.5">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6 hover:bg-white/10"
-                    onClick={() => setOutputExpanded(!outputExpanded)}
-                    title={outputExpanded ? 'Collapse' : 'Expand'}
-                  >
-                    {outputExpanded ? <Minimize2 className="h-3 w-3 text-slate-400" /> : <Maximize2 className="h-3 w-3 text-slate-400" />}
-                  </Button>
+            {/* Tab Header */}
+            <div className="flex items-center justify-between px-3 py-1.5 border-b border-white/5 bg-white/5">
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={() => setActiveTab('output')}
+                  className={cn(
+                    "flex items-center gap-2 text-[11px] font-medium transition-colors hover:text-primary",
+                    activeTab === 'output' ? "text-primary border-b border-primary pb-0.5" : "text-slate-500"
+                  )}
+                >
+                  <Bot className="h-3.5 w-3.5" />
+                  AI OUTPUT
+                </button>
+                <button
+                  onClick={() => setActiveTab('terminal')}
+                  className={cn(
+                    "flex items-center gap-2 text-[11px] font-medium transition-colors hover:text-primary",
+                    activeTab === 'terminal' ? "text-primary border-b border-primary pb-0.5" : "text-slate-500"
+                  )}
+                >
+                  <TerminalIcon className="h-3.5 w-3.5" />
+                  TERMINAL
+                </button>
+              </div>
+              <div className="flex items-center gap-0.5">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 hover:bg-white/10"
+                  onClick={() => setTerminalExpanded(!terminalExpanded)}
+                  title={terminalExpanded ? 'Collapse' : 'Expand'}
+                >
+                  {terminalExpanded ? <Minimize2 className="h-3 w-3 text-slate-400" /> : <Maximize2 className="h-3 w-3 text-slate-400" />}
+                </Button>
+                {activeTab === 'output' && (
                   <Button
                     variant="ghost"
                     size="icon"
                     className="h-6 w-6 hover:bg-white/10"
                     onClick={() => setAiOutput('')}
-                    title="Clear"
+                    title="Clear Output"
                   >
                     <X className="h-3 w-3 text-slate-400" />
                   </Button>
-                </div>
+                )}
               </div>
+            </div>
 
-              {/* Output Content */}
-              <div ref={outputRef} className="flex-1 overflow-auto p-4 selection:bg-primary/30">
-                {aiLoading ? (
-                  <div className="flex items-center gap-2 text-primary text-[12px]">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>Analyzing code...</span>
-                  </div>
-                ) : aiOutput ? (
-                  <div className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-slate-300">
-                    {aiOutput}
-                  </div>
-                ) : (
-                  <div className="text-slate-600 italic text-[11px]">
-                    Select an action from the right panel to analyze your code.
+            {/* Content Area */}
+            <div className="flex-1 overflow-hidden relative">
+              {/* AI Output Content */}
+              <div className={cn("h-full flex flex-col bg-[#0b0c10] font-mono", activeTab !== 'output' && "hidden")}>
+                <div ref={outputRef} className="flex-1 overflow-auto p-4 selection:bg-primary/30 text-slate-300">
+                  {aiLoading ? (
+                    <div className="flex items-center gap-2 text-primary text-[12px]">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <span>Analyzing code...</span>
+                    </div>
+                  ) : aiOutput ? (
+                    <div className="whitespace-pre-wrap break-words text-[12px] leading-relaxed">
+                      {aiOutput}
+                    </div>
+                  ) : (
+                    <div className="text-slate-600 italic text-[11px]">
+                      Select an AI action from the right panel.
+                    </div>
+                  )}
+                </div>
+                {/* Input area for AI actions */}
+                {(selectedAction === 'simulate' || selectedAction === 'redesign') && (
+                  <div className="p-3 bg-white/5 border-t border-white/5 mt-auto">
+                    <div className="flex items-start gap-2">
+                      <textarea
+                        rows={2}
+                        value={userInput}
+                        onChange={(e) => setUserInput(e.target.value)}
+                        placeholder={selectedAction === 'simulate' ? "Input values..." : "Restructure needs..."}
+                        className="flex-1 bg-transparent border border-white/10 rounded p-2 outline-none text-xs text-white placeholder:text-slate-600 resize-none min-h-[2.5rem]"
+                      />
+                      <Button size="icon" className="h-8 w-8" onClick={() => handleAction(selectedAction)} disabled={aiLoading}>
+                        <Send className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                   </div>
                 )}
               </div>
 
-              {/* Input area for Simulate Runs and Re-Design */}
-              {(selectedAction === 'simulate' || selectedAction === 'redesign') && (
-                <div className="p-3 bg-white/5 border-t border-white/5">
-                  <div className="flex items-start gap-2">
-                    <textarea
-                      rows={2}
-                      value={userInput}
-                      onChange={(e) => setUserInput(e.target.value)}
-                      placeholder={
-                        selectedAction === 'simulate'
-                          ? 'Enter input values (one per line)...'
-                          : 'Describe your redesign needs...'
-                      }
-                      className="flex-1 bg-transparent border border-white/10 rounded p-2 outline-none text-xs text-white placeholder:text-slate-600 resize-none min-h-[2.5rem] max-h-[120px]"
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          handleAction(selectedAction);
-                        }
-                      }}
-                    />
-                    <Button
-                      size="icon"
-                      className="h-8 w-8 shrink-0"
-                      onClick={() => handleAction(selectedAction)}
-                      disabled={aiLoading}
-                    >
-                      <Send className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </div>
-              )}
+              {/* Terminal Content */}
+              <div className={cn("h-full", activeTab !== 'terminal' && "hidden")}>
+                <Terminal isExpanded={terminalExpanded} onExpand={() => setTerminalExpanded(!terminalExpanded)} />
+              </div>
             </div>
           </div>
         </div>
