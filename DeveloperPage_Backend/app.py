@@ -1,7 +1,7 @@
 import os
 import json
 import asyncio
-import signal
+import platform
 from fastapi import FastAPI, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,17 +13,29 @@ from dotenv import load_dotenv
 env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../.env'))
 load_dotenv(env_path)
 import subprocess
+from typing import List, Optional, Dict
+from watchfiles import awatch
+
+# ─── System Detection ────────────────────────────────────────────────────────
+SYSTEM = platform.system()          # 'Windows', 'Linux', 'Darwin'
+IS_WINDOWS = SYSTEM == 'Windows'
+
+# PTY is only available on Unix/macOS
 try:
-    import pty
-    import fcntl
-    import termios
-    import struct
-    import select
+    import pty, fcntl, termios, struct, select
     HAS_PTY = True
 except ImportError:
     HAS_PTY = False
-from typing import List, Optional, Dict
-from watchfiles import awatch
+
+if IS_WINDOWS:
+    SHELL = ['cmd.exe']
+    SHELL_NAME = 'cmd.exe'
+elif os.path.exists('/bin/zsh'):
+    SHELL = ['/bin/zsh']
+    SHELL_NAME = 'zsh'
+else:
+    SHELL = ['/bin/bash']
+    SHELL_NAME = 'bash'
 
 # Try to import google.generativeai, handle if missing
 try:
@@ -100,19 +112,6 @@ except ImportError as e:
 
 # Global state
 CURRENT_DIR = os.getcwd()
-TERM_PROCESS = None
-MASTER_FD = None
-terminal_lock = asyncio.Lock()
-
-def set_winsize(fd, rows, cols):
-    """Update PTY window size."""
-    if fd is not None:
-        try:
-            s = struct.pack('HHHH', int(rows), int(cols), 0, 0)
-            fcntl.ioctl(fd, termios.TIOCSWINSZ, s)
-        except Exception as e:
-            logger.error(f"Failed to set winsize: {e}")
-
 
 # Configure GenAI
 model = None
@@ -130,110 +129,216 @@ if HAS_GENAI:
     else:
         logger.warning("No valid Google/Gemini API Key found. AI Agent will be disabled.")
 
+
+# ─── Cross-Platform Terminal WebSocket ───────────────────────────────────────
+
 @app.websocket("/ws/terminal")
 async def terminal_websocket(websocket: WebSocket):
-    global CURRENT_DIR, MASTER_FD, TERM_PROCESS
+    """Bidirectional WebSocket terminal.
+
+    • Windows  → spawns cmd.exe with asyncio subprocess + piped I/O
+    • Unix/Mac → spawns bash/zsh via PTY for proper TTY support
+
+    Message protocol (JSON):
+      client → server  { type: 'input',  data: '<chars>' }
+      client → server  { type: 'resize', rows: N, cols: N }
+      server → client  raw text / ANSI sequences
+    """
+    global CURRENT_DIR
     await websocket.accept()
-    logger.info(f"Terminal WebSocket connected. CWD: {CURRENT_DIR}")
-    
-    async def ensure_terminal():
-        global MASTER_FD, TERM_PROCESS
-        async with terminal_lock:
-            if MASTER_FD is None or TERM_PROCESS is None or TERM_PROCESS.poll() is not None:
-                if not HAS_PTY:
-                    await websocket.send_text("\\r\\n\\x1b[31m[ERROR] PTY terminal is not supported natively on Windows in this implementation.\\x1b[0m\\r\\n")
-                    return False
-                
-                logger.info("Initializing new PTY terminal shell...")
-                try:
-                    master_fd, slave_fd = pty.openpty()
-                    import platform
-                    shell = "/bin/zsh" if platform.system() == "Darwin" else "/bin/bash"
-                    
-                    # Set environment to encourage clean output
-                    env = os.environ.copy()
-                    env['TERM'] = 'xterm-mono'
-                    env['COLORTERM'] = ''
-                    env['LANG'] = 'en_US.UTF-8'
-                    env['PROMPT_EOL_MARK'] = '' # Disable Zsh partial line marker
-                    
-                    TERM_PROCESS = subprocess.Popen(
-                        [shell],
-                        stdin=slave_fd,
-                        stdout=slave_fd,
-                        stderr=slave_fd,
-                        cwd=CURRENT_DIR,
-                        env=env,
-                        start_new_session=True
-                    )
-                    os.close(slave_fd)
-                    
-                    # Set non-blocking
-                    fl = fcntl.fcntl(master_fd, fcntl.F_GETFL)
-                    fcntl.fcntl(master_fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-                    MASTER_FD = master_fd
-                    logger.info(f"PTY initialized with FD: {MASTER_FD}")
-                except Exception as e:
-                    logger.error(f"Failed to initialize PTY: {e}")
-                    await websocket.send_text(f"\\r\\n\\x1b[31m[ERROR] Failed to init terminal: {e}\\x1b[0m\\r\\n")
-                    return False
-            return True
+    logger.info(f"Terminal WS connected | system={SYSTEM} | shell={SHELL_NAME} | cwd={CURRENT_DIR}")
 
-    await ensure_terminal()
+    # Send a welcome banner so the user knows what shell they got
+    await websocket.send_text(
+        f"\r\n\x1b[32m[SynnccIT Terminal]\x1b[0m "
+        f"\x1b[90m{SYSTEM} · {SHELL_NAME}\x1b[0m\r\n"
+    )
 
-    async def read_from_pty():
-        while True:
-            try:
-                # We need to read even if MASTER_FD is None (it shouldn't be for long)
-                # But let's localise it
-                fd = MASTER_FD
-                if fd is not None:
-                    try:
-                        data = os.read(fd, 4096)
-                        if data:
-                            await websocket.send_text(data.decode('utf-8', errors='replace'))
-                    except BlockingIOError:
-                        await asyncio.sleep(0.02)
-                        continue
-                else:
-                    await asyncio.sleep(0.1)
-            except Exception as e:
-                logger.error(f"Error reading from PTY: {e}")
-                break
-            await asyncio.sleep(0.01)
+    if IS_WINDOWS:
+        await _run_windows_terminal(websocket)
+    elif HAS_PTY:
+        await _run_pty_terminal(websocket)
+    else:
+        await _run_pipe_terminal(websocket)
 
-    read_task = asyncio.create_task(read_from_pty())
-    
+
+async def _run_windows_terminal(websocket: WebSocket):
+    """Windows terminal using asyncio subprocess with piped stdin/stdout."""
+    global CURRENT_DIR
+    proc = None
     try:
-        while True:
-            msg = await websocket.receive_text()
-            if msg:
+        proc = await asyncio.create_subprocess_exec(
+            *SHELL,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,  # merge stderr into stdout
+            cwd=CURRENT_DIR,
+            env=os.environ.copy(),
+        )
+        logger.info(f"Windows shell spawned (PID {proc.pid})")
+
+        async def read_stdout():
+            """Forward shell output → WebSocket."""
+            while True:
                 try:
-                    data = json.loads(msg)
-                    msg_type = data.get("type")
-                    
-                    if MASTER_FD is None:
-                        await ensure_terminal()
-                    
-                    fd = MASTER_FD
-                    if fd is not None:
-                        if msg_type == "input":
-                            os.write(fd, data.get("data", "").encode())
-                        elif msg_type == "resize":
-                            set_winsize(fd, data.get("rows", 24), data.get("cols", 80))
-                except json.JSONDecodeError:
-                    # Fallback for raw text if still sent somehow
-                    if MASTER_FD is not None:
-                        os.write(MASTER_FD, msg.encode())
+                    chunk = await proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    await websocket.send_text(chunk.decode('utf-8', errors='replace'))
                 except Exception as e:
-                    logger.error(f"Error processing terminal msg: {e}")
-            await asyncio.sleep(0.01)
-    except WebSocketDisconnect:
-        logger.info("Terminal WebSocket disconnected")
+                    logger.error(f"stdout read error: {e}")
+                    break
+
+        read_task = asyncio.create_task(read_stdout())
+
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                    msg_type = msg.get("type")
+                    if msg_type == "input" and proc.stdin:
+                        data = msg.get("data", "")
+                        # On Windows Ctrl+C comes as \x03 — send as-is
+                        proc.stdin.write(data.encode('utf-8', errors='replace'))
+                        await proc.stdin.drain()
+                    # resize has no effect on cmd.exe but we acknowledge it silently
+                except json.JSONDecodeError:
+                    # Raw fallback
+                    if proc.stdin:
+                        proc.stdin.write(raw.encode('utf-8', errors='replace'))
+                        await proc.stdin.drain()
+        except WebSocketDisconnect:
+            logger.info("Windows terminal WS disconnected")
+        finally:
+            read_task.cancel()
     except Exception as e:
-        logger.error(f"Terminal WebSocket error: {e}")
+        logger.error(f"Windows terminal error: {e}")
+        try:
+            await websocket.send_text(f"\r\n\x1b[31m[ERROR] {e}\x1b[0m\r\n")
+        except Exception:
+            pass
     finally:
-        read_task.cancel()
+        if proc and proc.returncode is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+async def _run_pty_terminal(websocket: WebSocket):
+    """Unix PTY terminal (full TTY — handles colour, interactive programs)."""
+    global CURRENT_DIR
+    master_fd = None
+    proc = None
+    try:
+        master_fd, slave_fd = pty.openpty()
+        env = os.environ.copy()
+        env.update({'TERM': 'xterm-256color', 'LANG': 'en_US.UTF-8'})
+
+        proc = subprocess.Popen(
+            SHELL,
+            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+            cwd=CURRENT_DIR,
+            env=env,
+            start_new_session=True,
+        )
+        os.close(slave_fd)
+
+        fl = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+        fcntl.fcntl(master_fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        logger.info(f"PTY shell spawned (PID {proc.pid}, fd {master_fd})")
+
+        async def read_pty():
+            while True:
+                try:
+                    data = os.read(master_fd, 4096)
+                    if data:
+                        await websocket.send_text(data.decode('utf-8', errors='replace'))
+                except BlockingIOError:
+                    await asyncio.sleep(0.02)
+                    continue
+                except OSError:
+                    break
+                await asyncio.sleep(0.01)
+
+        read_task = asyncio.create_task(read_pty())
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                    if msg.get("type") == "input":
+                        os.write(master_fd, msg.get("data", "").encode())
+                    elif msg.get("type") == "resize":
+                        s = struct.pack('HHHH',
+                                        int(msg.get('rows', 24)),
+                                        int(msg.get('cols', 80)), 0, 0)
+                        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, s)
+                except json.JSONDecodeError:
+                    os.write(master_fd, raw.encode())
+        except WebSocketDisconnect:
+            logger.info("PTY terminal WS disconnected")
+        finally:
+            read_task.cancel()
+    except Exception as e:
+        logger.error(f"PTY terminal error: {e}")
+        try:
+            await websocket.send_text(f"\r\n\x1b[31m[ERROR] {e}\x1b[0m\r\n")
+        except Exception:
+            pass
+    finally:
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+            except Exception:
+                pass
+        if proc and proc.poll() is None:
+            proc.terminate()
+
+
+async def _run_pipe_terminal(websocket: WebSocket):
+    """Fallback pipe-based terminal for Unix systems without PTY."""
+    global CURRENT_DIR
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *SHELL,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=CURRENT_DIR,
+        )
+
+        async def read_stdout():
+            while True:
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+                await websocket.send_text(chunk.decode('utf-8', errors='replace'))
+
+        read_task = asyncio.create_task(read_stdout())
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                    if msg.get("type") == "input" and proc.stdin:
+                        proc.stdin.write(msg.get("data", "").encode())
+                        await proc.stdin.drain()
+                except json.JSONDecodeError:
+                    if proc.stdin:
+                        proc.stdin.write(raw.encode())
+                        await proc.stdin.drain()
+        except WebSocketDisconnect:
+            logger.info("Pipe terminal WS disconnected")
+        finally:
+            read_task.cancel()
+    except Exception as e:
+        logger.error(f"Pipe terminal error: {e}")
+    finally:
+        if proc and proc.returncode is None:
+            proc.kill()
 
 # --- WebSocket File System Events ---
 
@@ -467,17 +572,8 @@ def select_workspace_folder():
             global CURRENT_DIR
             CURRENT_DIR = os.path.abspath(path)
             logger.info(f"Workspace root changed to: {CURRENT_DIR}")
-            
-            # Reset Terminal PTY to pick up the new directory next time it starts
-            global TERM_PROCESS, MASTER_FD
-            if TERM_PROCESS:
-                try:
-                    TERM_PROCESS.terminate()
-                except:
-                    pass
-                TERM_PROCESS = None
-                MASTER_FD = None
-                
+            # Each WebSocket terminal spawns its own subprocess, so the new
+            # CURRENT_DIR will be picked up automatically on the next connection.
             return {"path": CURRENT_DIR, "success": True}
         
         return {"error": "Folder selection cancelled or failed"}
