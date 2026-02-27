@@ -1,162 +1,118 @@
 /**
- * Vercel Serverless Function — handles all 6 AI testing actions.
- * File: api/ai/[action].js
- * Auto-routed by Vercel to:  /api/ai/quick-test, /api/ai/code-explain, etc.
+ * Vercel Serverless Function — AI Testing Actions
+ * Route: POST /api/ai/{action}
  *
- * Uses CommonJS (module.exports) for maximum Vercel compatibility.
- * Reads OPENROUTER_API_KEY from Vercel environment variables.
+ * ESM format (required by "type": "module" in package.json).
+ * Uses OPENROUTER_API_KEY from Vercel environment variables.
  */
 
-module.exports = async function handler(req, res) {
-    // ── CORS ─────────────────────────────────────────────────────────────────
+export default async function handler(req, res) {
+    // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') return res.status(200).end();
-    if (req.method !== 'POST')
-        return res.status(405).json({ error: 'Method not allowed. Use POST.' });
+    if (req.method !== 'POST') return res.status(405).json({ detail: 'POST only' });
 
-    // ── Route params ──────────────────────────────────────────────────────────
-    const action = req.query.action;
-
-    // ── Body parsing ──────────────────────────────────────────────────────────
-    const { code = '', language = 'python', selected_text, user_input } = req.body || {};
-
-    // ── Environment ───────────────────────────────────────────────────────────
-    const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-    const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL_LINK
-        || 'arcee-ai/trinity-large-preview:free';
-
-    if (!OPENROUTER_API_KEY) {
-        return res.status(503).json({
-            error:
-                'OPENROUTER_API_KEY is not configured.\n'
-                + 'Go to Vercel → Project → Settings → Environment Variables\n'
-                + 'and add OPENROUTER_API_KEY with your OpenRouter key.',
-        });
-    }
-
-    // ── Target code: drag-selection takes priority over full file ─────────────
-    const target = (selected_text && selected_text.trim()) ? selected_text.trim() : code;
-    const scope = (selected_text && selected_text.trim()) ? '(selected snippet)' : '(full file)';
-
-    // ── Prompt map ────────────────────────────────────────────────────────────
-    const prompts = {
-        'quick-test': {
-            system:
-                'You are a senior code reviewer. Give a crisp, bullet-style review. '
-                + 'Cover: correctness, edge cases, style, potential bugs, performance. '
-                + 'Max 10 bullets. End with an overall VERDICT line.',
-            user: `Review this ${language} ${scope} code:\n\n\`\`\`\n${target}\n\`\`\``,
-        },
-        'generate-tests': {
-            system:
-                'You are a test engineer. Generate 5 meaningful test cases.\n'
-                + 'Format each as:\n'
-                + '  Test Case N:\n  Input: <value>\n  Expected Output: <value>\n\n'
-                + 'Then suggest debug print placements.',
-            user: `Code ${scope}:\n\`\`\`${language}\n${target}\n\`\`\``,
-        },
-        'code-explain': {
-            system:
-                'You are an expert code explainer. For each logical block: state WHAT it does, '
-                + 'WHY it does it, note patterns/algorithms used, flag potential issues. '
-                + 'Use clear headers and bullet points.',
-            user: `Explain this ${language} code:\n\n\`\`\`\n${target}\n\`\`\``,
-        },
-        'simulate': {
-            system: user_input
-                ? 'You are a code runtime simulator. Trace through the code with the given input, '
-                + 'show every step, the expected output, and any possible errors.'
-                : 'You are a code analyst. Tell the user exactly what inputs this code expects '
-                + '(type, format, count). Give 2-3 concrete example inputs they can try.',
-            user: user_input
-                ? `Code:\n\`\`\`${language}\n${target}\n\`\`\`\n\nUser input provided: ${user_input}\n\nSimulate step by step.`
-                : `What inputs does this code need?\n\n\`\`\`${language}\n${target}\n\`\`\``,
-        },
-        'reduce-complexity': {
-            system:
-                'You are an algorithm optimisation expert. Provide:\n'
-                + '1. Current Complexity Analysis (Time + Space Big-O)\n'
-                + '2. Optimisation Suggestions (ranked by impact, include code snippets)\n'
-                + '3. Data Structure Recommendations\n'
-                + 'At the very end of your response, on their own lines:\n'
-                + '   EFFICIENCY_SCORE: <0-100>\n'
-                + '   SCALABILITY_SCORE: <0-100>',
-            user: `Analyse and optimise this ${language} ${scope}:\n\n\`\`\`\n${target}\n\`\`\``,
-        },
-        'redesign': {
-            system:
-                'You are a senior software architect. Provide:\n'
-                + '1. Brief current design analysis\n'
-                + '2. Complete redesigned code implementing the user requirements\n'
-                + '3. Changes summary (bullet points)',
-            user:
-                `Requirements: ${user_input || 'Improve overall design and structure'}\n\n`
-                + `Code to redesign:\n\`\`\`${language}\n${target}\n\`\`\``,
-        },
-    };
-
-    const prompt = prompts[action];
-    if (!prompt) {
-        return res.status(400).json({
-            error: `Unknown action: "${action}". Valid actions: quick-test, generate-tests, code-explain, simulate, reduce-complexity, redesign`,
-        });
-    }
-
-    // ── Call OpenRouter ───────────────────────────────────────────────────────
     try {
-        const aiResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'https://sync-it-ecru.vercel.app',
-                'X-Title': 'SynnccIT',
-            },
-            body: JSON.stringify({
-                model: OPENROUTER_MODEL,
-                messages: [
-                    { role: 'system', content: prompt.system },
-                    { role: 'user', content: prompt.user },
-                ],
-                max_tokens: 1800,
-                temperature: 0.3,
-            }),
-        });
+        const action = req.query.action;
+        const body = req.body || {};
+        const code = body.code || '';
+        const language = body.language || 'python';
+        const selected_text = body.selected_text || '';
+        const user_input = body.user_input || '';
 
-        if (!aiResponse.ok) {
-            const errBody = await aiResponse.text();
-            return res.status(502).json({
-                error: `OpenRouter returned HTTP ${aiResponse.status}: ${errBody.slice(0, 400)}`,
+        const API_KEY = process.env.OPENROUTER_API_KEY;
+        const MODEL = process.env.OPENROUTER_MODEL_LINK || 'arcee-ai/trinity-large-preview:free';
+
+        if (!API_KEY) {
+            return res.status(503).json({
+                detail: 'OPENROUTER_API_KEY not set. Add it in Vercel → Settings → Environment Variables.'
             });
         }
 
-        const data = await aiResponse.json();
-        const result = data.choices?.[0]?.message?.content?.trim()
-            || 'AI returned an empty response.';
+        const target = selected_text.trim() || code;
+        const scope = selected_text.trim() ? '(selected snippet)' : '(full file)';
 
-        // Parse complexity scores if present
-        let metrics = null;
-        if (action === 'reduce-complexity') {
-            let efficiency = 50, scalability = 50;
-            for (const line of result.split('\n')) {
-                if (line.includes('EFFICIENCY_SCORE:')) {
-                    const n = parseInt(line.split(':')[1], 10);
-                    if (!isNaN(n)) efficiency = n;
-                }
-                if (line.includes('SCALABILITY_SCORE:')) {
-                    const n = parseInt(line.split(':')[1], 10);
-                    if (!isNaN(n)) scalability = n;
-                }
+        const PROMPTS = {
+            'quick-test': {
+                system: 'You are a senior code reviewer. Give a crisp bullet-style review covering correctness, edge cases, style, bugs, and performance. Max 10 bullets. End with a VERDICT.',
+                user: `Review this ${language} ${scope} code:\n\`\`\`\n${target}\n\`\`\``
+            },
+            'generate-tests': {
+                system: 'You are a test engineer. Generate 5 meaningful test cases (Input + Expected Output). Then suggest debug print placements.',
+                user: `Code ${scope}:\n\`\`\`${language}\n${target}\n\`\`\``
+            },
+            'code-explain': {
+                system: 'You are an expert code explainer. For each block: what it does, why, patterns used, and issues. Use headers and bullets.',
+                user: `Explain this ${language} code:\n\`\`\`\n${target}\n\`\`\``
+            },
+            'simulate': {
+                system: user_input
+                    ? 'You are a runtime simulator. Trace through the code step by step with the given input. Show expected output and note errors.'
+                    : 'You are a code analyst. Describe exactly what inputs this code expects (type, format, count). Give 2-3 example inputs.',
+                user: user_input
+                    ? `Code:\n\`\`\`${language}\n${target}\n\`\`\`\n\nInput: ${user_input}\n\nSimulate step by step.`
+                    : `What inputs does this code need?\n\`\`\`${language}\n${target}\n\`\`\``
+            },
+            'reduce-complexity': {
+                system: 'You are an algorithm expert. Provide: 1) Current complexity (Time+Space Big-O), 2) Optimisation suggestions with code, 3) Data structure tips. End with:\nEFFICIENCY_SCORE: <0-100>\nSCALABILITY_SCORE: <0-100>',
+                user: `Optimise this ${language} ${scope}:\n\`\`\`\n${target}\n\`\`\``
+            },
+            'redesign': {
+                system: 'You are a software architect. Provide: 1) Brief analysis, 2) Complete redesigned code, 3) Changes summary.',
+                user: `Requirements: ${user_input || 'Improve overall design'}\n\nCode:\n\`\`\`${language}\n${target}\n\`\`\``
             }
-            metrics = { efficiency, scalability };
+        };
+
+        const prompt = PROMPTS[action];
+        if (!prompt) {
+            return res.status(400).json({
+                detail: `Unknown action "${action}". Valid: ${Object.keys(PROMPTS).join(', ')}`
+            });
         }
 
-        return res.json({ result, metrics, test_results: null });
+        const aiRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${API_KEY}`,
+                'Content-Type': 'application/json',
+                'HTTP-Referer': 'https://sync-it-ecru.vercel.app',
+                'X-Title': 'SynnccIT'
+            },
+            body: JSON.stringify({
+                model: MODEL,
+                messages: [
+                    { role: 'system', content: prompt.system },
+                    { role: 'user', content: prompt.user }
+                ],
+                max_tokens: 1800,
+                temperature: 0.3
+            })
+        });
+
+        if (!aiRes.ok) {
+            const errText = await aiRes.text();
+            return res.status(502).json({ detail: `OpenRouter HTTP ${aiRes.status}: ${errText.slice(0, 300)}` });
+        }
+
+        const data = await aiRes.json();
+        const result = data.choices?.[0]?.message?.content?.trim() || 'Empty AI response.';
+
+        let metrics = null;
+        if (action === 'reduce-complexity') {
+            let eff = 50, sc = 50;
+            for (const line of result.split('\n')) {
+                if (line.includes('EFFICIENCY_SCORE:')) { const n = parseInt(line.split(':')[1], 10); if (!isNaN(n)) eff = n; }
+                if (line.includes('SCALABILITY_SCORE:')) { const n = parseInt(line.split(':')[1], 10); if (!isNaN(n)) sc = n; }
+            }
+            metrics = { efficiency: eff, scalability: sc };
+        }
+
+        return res.status(200).json({ result, metrics, test_results: null });
 
     } catch (err) {
-        return res.status(500).json({ error: `Request to OpenRouter failed: ${err.message}` });
+        console.error('AI function error:', err);
+        return res.status(500).json({ detail: `Internal error: ${err.message}` });
     }
-};
+}
