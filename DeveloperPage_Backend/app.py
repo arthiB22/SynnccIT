@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import asyncio.subprocess
 import platform
 from fastapi import FastAPI, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -175,10 +176,14 @@ async def _run_windows_terminal(websocket: WebSocket):
             cwd=CURRENT_DIR,
             env=os.environ.copy(),
         )
+        if proc is None:
+            raise RuntimeError("Failed to spawn Windows terminal process.")
+        
         logger.info(f"Windows shell spawned (PID {proc.pid})")
 
         async def read_stdout():
             """Forward shell output → WebSocket."""
+            if proc.stdout is None: return
             while True:
                 try:
                     chunk = await proc.stdout.read(4096)
@@ -194,10 +199,11 @@ async def _run_windows_terminal(websocket: WebSocket):
         try:
             while True:
                 raw = await websocket.receive_text()
+                if proc.stdin is None: break
                 try:
                     msg = json.loads(raw)
                     msg_type = msg.get("type")
-                    if msg_type == "input" and proc.stdin:
+                    if msg_type == "input":
                         data = msg.get("data", "")
                         # On Windows Ctrl+C comes as \x03 — send as-is
                         proc.stdin.write(data.encode('utf-8', errors='replace'))
@@ -205,9 +211,8 @@ async def _run_windows_terminal(websocket: WebSocket):
                     # resize has no effect on cmd.exe but we acknowledge it silently
                 except json.JSONDecodeError:
                     # Raw fallback
-                    if proc.stdin:
-                        proc.stdin.write(raw.encode('utf-8', errors='replace'))
-                        await proc.stdin.drain()
+                    proc.stdin.write(raw.encode('utf-8', errors='replace'))
+                    await proc.stdin.drain()
         except WebSocketDisconnect:
             logger.info("Windows terminal WS disconnected")
         finally:
@@ -311,6 +316,7 @@ async def _run_pipe_terminal(websocket: WebSocket):
         )
 
         async def read_stdout():
+            if proc.stdout is None: return
             while True:
                 chunk = await proc.stdout.read(4096)
                 if not chunk:
@@ -321,15 +327,15 @@ async def _run_pipe_terminal(websocket: WebSocket):
         try:
             while True:
                 raw = await websocket.receive_text()
+                if proc.stdin is None: break
                 try:
                     msg = json.loads(raw)
-                    if msg.get("type") == "input" and proc.stdin:
+                    if msg.get("type") == "input":
                         proc.stdin.write(msg.get("data", "").encode())
                         await proc.stdin.drain()
                 except json.JSONDecodeError:
-                    if proc.stdin:
-                        proc.stdin.write(raw.encode())
-                        await proc.stdin.drain()
+                    proc.stdin.write(raw.encode())
+                    await proc.stdin.drain()
         except WebSocketDisconnect:
             logger.info("Pipe terminal WS disconnected")
         finally:
